@@ -50,10 +50,13 @@ def run_player() -> None:
         reset_pin=_int_or_none(env("PN532_RESET_PIN")),
     )
 
-    players = {
-        "youtube": YoutubePlayer(audio_output=env("AUDIO_OUTPUT", "pipewire")),
-        "spotify": SpotifyPlayer(device_name=env("SPOTIFY_DEVICE_NAME", "mini-vinyl")),
-    }
+    players = {"youtube": YoutubePlayer(audio_output=env("AUDIO_OUTPUT", "pipewire"))}
+
+    if env("SPOTIFY_CLIENT_ID") and env("SPOTIFY_CLIENT_SECRET"):
+        players["spotify"] = SpotifyPlayer(device_name=env("SPOTIFY_DEVICE_NAME", "mini-vinyl"))
+    else:
+        print("[main] Spotify not configured - spotify: tags will be ignored")
+
     manager = PlayerManager(players)
 
     current_uid = None
