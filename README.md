@@ -172,10 +172,10 @@ or speaker address differ from the placeholders.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
   `yt-dlp` under the hood) and plays audio out through PipeWire, which
   owns the Bluetooth speaker's A2DP sink. Resolving a YouTube URL live is
-  slow on Zero W hardware, so the first play of a tag also caches the
-  first 60 seconds of audio to `~/.cache/mini-vinyl/youtube/` in the
-  background; later plays of that tag start instantly from the cached
-  clip and hand off to the live stream once it catches up.
+  slow on Zero W hardware, so the first play of a tag also downloads the
+  full audio to `~/.cache/mini-vinyl/youtube/` in the background; later
+  plays of that tag find the cached file and start instantly, with no
+  live resolution involved.
 - `mini_vinyl/players/spotify_player.py` uses the Spotify Web API
   (`spotipy`) to tell the `librespot` Spotify Connect instance running on
   the Pi what to play; `librespot` itself does the audio decode/output,
