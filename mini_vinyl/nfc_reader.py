@@ -20,11 +20,31 @@ def uid_to_str(uid: bytearray) -> str:
 
 
 class NfcReader:
-    def __init__(self, irq_pin: int | None = None, reset_pin: int | None = None):
+    def __init__(
+        self,
+        irq_pin: int | None = None,
+        reset_pin: int | None = None,
+        init_retries: int = 3,
+        init_retry_delay: float = 1.0,
+    ):
         i2c = busio.I2C(board.SCL, board.SDA)
-
         reset = DigitalInOut(getattr(board, f"D{reset_pin}")) if reset_pin else None
-        self._pn532 = PN532_I2C(i2c, debug=False, reset=reset)
+
+        # Right after a previous process exits, the PN532 sometimes isn't
+        # ready to handshake yet and init raises RuntimeError("Did not
+        # receive expected ACK"). Retrying after a short pause reliably
+        # recovers from this.
+        last_exc: RuntimeError | None = None
+        self._pn532 = None
+        for attempt in range(init_retries):
+            try:
+                self._pn532 = PN532_I2C(i2c, debug=False, reset=reset)
+                break
+            except RuntimeError as exc:
+                last_exc = exc
+                time.sleep(init_retry_delay)
+        if self._pn532 is None:
+            raise last_exc
 
         ic, ver, rev, support = self._pn532.firmware_version
         print(f"Found PN532 firmware {ver}.{rev}")
