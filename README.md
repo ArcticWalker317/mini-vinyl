@@ -40,7 +40,7 @@ Pi just reads whatever URI is written on the tag.
 ```bash
 sudo apt update
 sudo apt install -y python3-venv python3-pip i2c-tools bluez bluez-tools \
-  mpv pipewire pipewire-alsa wireplumber
+  mpv ffmpeg pipewire pipewire-alsa wireplumber
 
 sudo raspi-config   # Interface Options -> I2C -> enable, then reboot
 i2cdetect -y 1        # confirm the PN532 shows up (usually addr 0x24)
@@ -171,7 +171,11 @@ or speaker address differ from the placeholders.
   playback.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
   `yt-dlp` under the hood) and plays audio out through PipeWire, which
-  owns the Bluetooth speaker's A2DP sink.
+  owns the Bluetooth speaker's A2DP sink. Resolving a YouTube URL live is
+  slow on Zero W hardware, so the first play of a tag also caches the
+  first 60 seconds of audio to `~/.cache/mini-vinyl/youtube/` in the
+  background; later plays of that tag start instantly from the cached
+  clip and hand off to the live stream once it catches up.
 - `mini_vinyl/players/spotify_player.py` uses the Spotify Web API
   (`spotipy`) to tell the `librespot` Spotify Connect instance running on
   the Pi what to play; `librespot` itself does the audio decode/output,
