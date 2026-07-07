@@ -39,7 +39,7 @@ class NfcReader:
             return None
         return uid_to_str(uid)
 
-    def _read_page(self, page: int, retries: int = 4, retry_delay: float = 0.03):
+    def _read_page(self, page: int, retries: int = 8, retry_delay: float = 0.05):
         """A single ntag2xx_read_block call occasionally comes back None
         (I2C timing hiccup / tag briefly out of range) even mid-read of a
         tag that's otherwise sitting still - retry a few times before
@@ -54,7 +54,7 @@ class NfcReader:
             time.sleep(retry_delay)
         return None
 
-    def read_ndef_uri(self, max_pages: int = 42) -> str | None:
+    def read_ndef_uri(self, max_pages: int = 42, inter_page_delay: float = 0.02) -> str | None:
         """Reads the NDEF TLV starting at page 4 of an NTAG21x tag
         currently in range and returns the URI from its first record, or
         None if there's no tag, no NDEF data, or it's not a URI record.
@@ -65,6 +65,7 @@ class NfcReader:
             if block is None:
                 return None
             data += block
+            time.sleep(inter_page_delay)  # avoid hammering the I2C bus
 
             if len(data) >= 2 and data[0] == 0x03:
                 length = data[1]
