@@ -1,0 +1,15 @@
+[Unit]
+Description=Reconnect the paired Bluetooth speaker on boot
+After=bluetooth.target
+Requires=bluetooth.target
+
+[Service]
+Type=oneshot
+# Replace AA:BB:CC:DD:EE:FF with your speaker's MAC (same as
+# BLUETOOTH_SPEAKER_MAC in config/secrets.env). The speaker must already be
+# paired + trusted via `bluetoothctl` before this will work.
+ExecStart=/usr/bin/bluetoothctl connect AA:BB:CC:DD:EE:FF
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

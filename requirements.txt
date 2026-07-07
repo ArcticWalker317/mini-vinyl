@@ -1,0 +1,5 @@
+adafruit-blinka
+adafruit-circuitpython-pn532
+PyYAML
+spotipy
+python-dotenv

@@ -1,0 +1,14 @@
+[Unit]
+Description=mini-vinyl NFC record player
+After=bluetooth.target librespot.service pipewire.service network-online.target
+Wants=librespot.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mini-vinyl
+ExecStart=%h/mini-vinyl/venv/bin/python -m mini_vinyl.main
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

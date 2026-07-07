@@ -1,0 +1,164 @@
+# mini-vinyl
+
+A tiny NFC-triggered record player. Each vinyl has an NFC tag glued in;
+tapping it to a PN532 reader plays either a YouTube video's audio or a
+Spotify track/album, out to a paired Bluetooth speaker. Lifting the vinyl
+stops playback.
+
+## Hardware
+
+- Raspberry Pi Zero W
+- PN532 NFC reader module, wired over **I2C**:
+
+  | PN532 | Pi Zero W        |
+  |-------|------------------|
+  | VCC   | 3V3 (pin 1)      |
+  | GND   | GND (pin 6)      |
+  | SDA   | GPIO2 / SDA (pin 3) |
+  | SCL   | GPIO3 / SCL (pin 5) |
+
+  Set the PN532's DIP switches/jumpers to I2C mode (check your board's
+  silkscreen/manual).
+
+- A Bluetooth speaker, paired ahead of time.
+
+## Software setup (on the Pi)
+
+> **Audio stack note:** Raspberry Pi OS Bookworm/Trixie use **PipeWire +
+> WirePlumber** for audio by default, including Bluetooth A2DP. This
+> project relies on that - it does **not** use `bluealsa`. If you
+> installed `bluealsa`/`bluez-alsa-utils` already, disable it so it
+> doesn't fight PipeWire over the Bluetooth audio profile:
+>
+> ```bash
+> sudo systemctl disable --now bluealsa.service bluealsa-aplay.service
+> ```
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip i2c-tools bluez bluez-tools \
+  mpv pipewire pipewire-alsa wireplumber
+
+sudo raspi-config   # Interface Options -> I2C -> enable, then reboot
+i2cdetect -y 1        # confirm the PN532 shows up (usually addr 0x24)
+
+git clone <this-repo> ~/mini-vinyl
+cd ~/mini-vinyl
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# yt-dlp is used by mpv to resolve YouTube audio streams
+pip install -U yt-dlp
+```
+
+### Bluetooth pairing
+
+```bash
+bluetoothctl
+> power on
+> agent on
+> scan on
+# note your speaker's MAC once it shows up, then:
+> scan off
+> pair AA:BB:CC:DD:EE:FF
+> trust AA:BB:CC:DD:EE:FF
+> connect AA:BB:CC:DD:EE:FF
+> quit
+```
+
+Confirm PipeWire/WirePlumber picked it up as an audio sink:
+
+```bash
+wpctl status   # look for the speaker under "Sinks"
+```
+
+If it doesn't show up as the *default* sink, set it explicitly (grab the
+ID from `wpctl status`):
+
+```bash
+wpctl set-default <sink-id>
+```
+
+### librespot (Spotify Connect)
+
+Only needed if you want Spotify tags to work. Requires a **Spotify
+Premium** account. Install a prebuilt `librespot` binary (see
+https://github.com/librespot-org/librespot for Pi/armhf builds - check
+whether the build has the `pipewire` backend compiled in; if not, use
+`--backend alsa --device default` in `systemd/librespot.service` instead,
+which PipeWire intercepts automatically via `pipewire-alsa`).
+
+Create a Spotify app at https://developer.spotify.com/dashboard, add
+`http://127.0.0.1:8080/callback` as a redirect URI, and copy the client
+ID/secret into `config/secrets.env`.
+
+### Config
+
+```bash
+cp config/tags.example.yaml config/tags.yaml
+cp config/secrets.example.env config/secrets.env
+```
+
+Fill in `config/secrets.env` (Bluetooth MAC, Spotify credentials).
+
+Find each vinyl's tag UID:
+
+```bash
+python -m mini_vinyl.main --scan
+```
+
+Hold each tag to the reader, note the printed UID, and add an entry to
+`config/tags.yaml` (see the comments in that file for the format).
+
+### Run it
+
+```bash
+python -m mini_vinyl.main
+```
+
+First Spotify playback will open a browser auth URL in the terminal -
+complete that once; the token is cached in `.spotify_token_cache` after.
+
+### Run on boot
+
+`mini-vinyl.service` and `librespot.service` need to reach your PipeWire
+session (audio), so they run as **user** systemd units, not system ones.
+`bt-autoconnect.service` just powers on the adapter and reconnects the
+speaker, so it stays a system unit.
+
+```bash
+# system unit (Bluetooth reconnect - runs as root, no audio session needed)
+sudo cp systemd/bt-autoconnect.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bt-autoconnect.service
+
+# user units (need your PipeWire session)
+mkdir -p ~/.config/systemd/user
+cp systemd/mini-vinyl.service systemd/librespot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now librespot.service   # if using Spotify
+systemctl --user enable --now mini-vinyl.service
+
+# let user services start at boot even before you log in
+sudo loginctl enable-linger "$USER"
+```
+
+Edit `WorkingDirectory=`/`ExecStart=` in `systemd/mini-vinyl.service` and
+the speaker MAC in `systemd/bt-autoconnect.service` if your install path
+or speaker address differ from the placeholders.
+
+## How it works
+
+- `mini_vinyl/nfc_reader.py` polls the PN532 for a tag UID.
+- `mini_vinyl/main.py` looks the UID up in `config/tags.yaml` and tells
+  the `PlayerManager` to start playback; when the tag is lifted (a few
+  consecutive empty polls, to ignore momentary read misses) it stops
+  playback.
+- `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
+  `yt-dlp` under the hood) and plays audio out through PipeWire, which
+  owns the Bluetooth speaker's A2DP sink.
+- `mini_vinyl/players/spotify_player.py` uses the Spotify Web API
+  (`spotipy`) to tell the `librespot` Spotify Connect instance running on
+  the Pi what to play; `librespot` itself does the audio decode/output,
+  also through PipeWire.
