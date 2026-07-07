@@ -54,11 +54,7 @@ class NfcReader:
             time.sleep(retry_delay)
         return None
 
-    def read_ndef_uri(self, max_pages: int = 42, inter_page_delay: float = 0.02) -> str | None:
-        """Reads the NDEF TLV starting at page 4 of an NTAG21x tag
-        currently in range and returns the URI from its first record, or
-        None if there's no tag, no NDEF data, or it's not a URI record.
-        """
+    def _read_ndef_uri_once(self, max_pages: int, inter_page_delay: float) -> str | None:
         data = bytearray()
         for page in range(4, max_pages):
             block = self._read_page(page)
@@ -72,6 +68,28 @@ class NfcReader:
                 if len(data) >= 2 + length:
                     return parse_ndef_message(bytes(data[2 : 2 + length]))
 
+        return None
+
+    def read_ndef_uri(
+        self, max_pages: int = 42, inter_page_delay: float = 0.02, attempts: int = 3
+    ) -> str | None:
+        """Reads the NDEF TLV starting at page 4 of an NTAG21x tag
+        currently in range and returns the URI from its first record, or
+        None if there's no tag, no NDEF data, or it's not a URI record.
+
+        A multi-page read takes long enough (a dozen+ separate PN532
+        transactions) that marginal RF coupling - e.g. a tag that's
+        slightly off-center or gets nudged mid-read - can desync the
+        PN532 from the tag partway through, at which point per-page
+        retries alone won't help. If a read comes up short, re-select the
+        tag from scratch and try the whole thing again.
+        """
+        for _ in range(attempts):
+            if self._pn532.read_passive_target(timeout=0.5) is None:
+                return None  # tag no longer in range at all
+            uri = self._read_ndef_uri_once(max_pages, inter_page_delay)
+            if uri is not None:
+                return uri
         return None
 
     def wait_for_tag(self, poll_interval: float = 0.3):
