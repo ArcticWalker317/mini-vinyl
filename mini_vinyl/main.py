@@ -2,14 +2,14 @@
 
 Usage:
     python -m mini_vinyl.main         # run the player
-    python -m mini_vinyl.main --scan  # print UIDs of tags held to the reader
+    python -m mini_vinyl.main --scan  # print UID + NDEF URI of scanned tags
 """
 
 import argparse
 import sys
 import time
 
-from mini_vinyl.config import load_secrets, load_tags, env
+from mini_vinyl.config import TagEntry, load_secrets, env
 from mini_vinyl.nfc_reader import NfcReader
 from mini_vinyl.player_manager import PlayerManager
 from mini_vinyl.players.youtube_player import YoutubePlayer
@@ -29,16 +29,21 @@ def run_scan() -> None:
     try:
         for uid in reader.wait_for_tag():
             if uid != last_uid:
-                print(f"UID: {uid}")
+                uri = reader.read_ndef_uri()
+                print(f"UID: {uid}  URI: {uri!r}")
                 last_uid = uid
     except KeyboardInterrupt:
         pass
 
 
+def tag_entry_from_uri(uid: str, uri: str) -> TagEntry:
+    if uri.startswith("spotify:"):
+        return TagEntry(uid=uid, type="spotify", id=uri)
+    return TagEntry(uid=uid, type="youtube", id=uri)
+
+
 def run_player() -> None:
     load_secrets()
-    tags = load_tags()
-    print(f"Loaded {len(tags)} tag(s)")
 
     reader = NfcReader(
         irq_pin=_int_or_none(env("PN532_IRQ_PIN")),
@@ -62,12 +67,12 @@ def run_player() -> None:
             if uid:
                 misses = 0
                 if uid != current_uid:
-                    tag = tags.get(uid)
-                    if tag is None:
-                        print(f"[main] unknown tag UID: {uid}")
+                    uri = reader.read_ndef_uri()
+                    if uri is None:
+                        print(f"[main] no NDEF URI found on tag {uid}")
                     else:
                         current_uid = uid
-                        manager.handle_tag_present(tag)
+                        manager.handle_tag_present(tag_entry_from_uri(uid, uri))
             else:
                 misses += 1
                 if current_uid is not None and misses >= REMOVAL_THRESHOLD:
@@ -87,7 +92,7 @@ def _int_or_none(v: str | None) -> int | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="mini-vinyl NFC record player")
     parser.add_argument(
-        "--scan", action="store_true", help="print UIDs of scanned tags and exit"
+        "--scan", action="store_true", help="print UID + NDEF URI of scanned tags and exit"
     )
     args = parser.parse_args()
 

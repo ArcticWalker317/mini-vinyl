@@ -1,6 +1,5 @@
 venv/
 __pycache__/
 *.pyc
-config/tags.yaml
 config/secrets.env
 .spotify_token_cache

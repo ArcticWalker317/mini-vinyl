@@ -1,9 +1,12 @@
 # mini-vinyl
 
-A tiny NFC-triggered record player. Each vinyl has an NFC tag glued in;
-tapping it to a PN532 reader plays either a YouTube video's audio or a
-Spotify track/album, out to a paired Bluetooth speaker. Lifting the vinyl
-stops playback.
+A tiny NFC-triggered record player. Each vinyl has an NTAG213/215/216 tag
+glued in, written (via a phone NFC-writer app, e.g. "NFC Tools") with a
+single URI record - either a YouTube URL or a `spotify:track:...` /
+`spotify:album:...` / `spotify:playlist:...` URI. Tapping it to the PN532
+reader plays that URI's audio out to a paired Bluetooth speaker. Lifting
+the vinyl stops playback. There's no on-Pi tag-to-song mapping file - the
+Pi just reads whatever URI is written on the tag.
 
 ## Hardware
 
@@ -96,20 +99,28 @@ ID/secret into `config/secrets.env`.
 ### Config
 
 ```bash
-cp config/tags.example.yaml config/tags.yaml
 cp config/secrets.example.env config/secrets.env
 ```
 
 Fill in `config/secrets.env` (Bluetooth MAC, Spotify credentials).
 
-Find each vinyl's tag UID:
+### Writing tags
+
+Using a phone NFC-writer app (e.g. "NFC Tools" on iOS/Android), write a
+single **URL/URI record** to each NTAG213/215/216 tag:
+
+- YouTube: the full video URL, e.g. `https://www.youtube.com/watch?v=...`
+- Spotify: a Spotify URI, e.g. `spotify:album:4LH4d3cOWNNsVw41Gqt2kv`
+  (get this from the Spotify app: Share -> Copy Spotify URI)
+
+Verify a tag was written correctly:
 
 ```bash
 python -m mini_vinyl.main --scan
 ```
 
-Hold each tag to the reader, note the printed UID, and add an entry to
-`config/tags.yaml` (see the comments in that file for the format).
+Hold the tag to the reader - it should print the UID and the decoded URI.
+If `URI: None`, the tag has no NDEF record (or isn't an NTAG21x tag).
 
 ### Run it
 
@@ -150,9 +161,12 @@ or speaker address differ from the placeholders.
 
 ## How it works
 
-- `mini_vinyl/nfc_reader.py` polls the PN532 for a tag UID.
-- `mini_vinyl/main.py` looks the UID up in `config/tags.yaml` and tells
-  the `PlayerManager` to start playback; when the tag is lifted (a few
+- `mini_vinyl/nfc_reader.py` polls the PN532 for a tag UID, then reads the
+  NDEF URI record directly off the tag (`mini_vinyl/ndef.py` does the
+  parsing).
+- `mini_vinyl/main.py` picks a player based on the URI's scheme
+  (`spotify:...` -> Spotify, everything else -> YouTube) and tells the
+  `PlayerManager` to start playback; when the tag is lifted (a few
   consecutive empty polls, to ignore momentary read misses) it stops
   playback.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
