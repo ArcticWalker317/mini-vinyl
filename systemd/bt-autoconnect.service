@@ -1,6 +1,6 @@
 [Unit]
 Description=Reconnect the paired Bluetooth speaker on boot
-After=bluetooth.target
+After=bluetooth.target pipewire.service wireplumber.service
 Requires=bluetooth.target
 
 [Service]
@@ -8,8 +8,15 @@ Type=oneshot
 # Replace AA:BB:CC:DD:EE:FF with your speaker's MAC (same as
 # BLUETOOTH_SPEAKER_MAC in config/secrets.env). The speaker must already be
 # paired + trusted via `bluetoothctl` before this will work.
-ExecStart=/usr/bin/bluetoothctl connect AA:BB:CC:DD:EE:FF
+#
+# This is a *user* service (not system) because it must run after
+# PipeWire/WirePlumber register the A2DP audio profile with BlueZ - those
+# run in the user session (see loginctl enable-linger in the README), and
+# a system-level unit would race ahead of them and fail with
+# "br-connection-profile-unavailable". The retry loop is a safety margin
+# in case PipeWire's own BlueZ handshake is still finishing up.
+ExecStart=/bin/bash -c 'for i in $(seq 1 10); do bluetoothctl connect AA:BB:CC:DD:EE:FF && exit 0; sleep 2; done; exit 1'
 RemainAfterExit=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

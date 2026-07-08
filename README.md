@@ -133,21 +133,18 @@ complete that once; the token is cached in `.spotify_token_cache` after.
 
 ### Run on boot
 
+All three services run as **user** systemd units, not system ones -
 `mini-vinyl.service` and `librespot.service` need to reach your PipeWire
-session (audio), so they run as **user** systemd units, not system ones.
-`bt-autoconnect.service` just powers on the adapter and reconnects the
-speaker, so it stays a system unit.
+audio session, and `bt-autoconnect.service` needs to run *after*
+PipeWire/WirePlumber have registered the A2DP audio profile with BlueZ
+(a system-level unit races ahead of that and fails to connect).
 
 ```bash
-# system unit (Bluetooth reconnect - runs as root, no audio session needed)
-sudo cp systemd/bt-autoconnect.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bt-autoconnect.service
-
-# user units (need your PipeWire session)
 mkdir -p ~/.config/systemd/user
-cp systemd/mini-vinyl.service systemd/librespot.service ~/.config/systemd/user/
+cp systemd/mini-vinyl.service systemd/librespot.service systemd/bt-autoconnect.service \
+  ~/.config/systemd/user/
 systemctl --user daemon-reload
+systemctl --user enable --now bt-autoconnect.service
 systemctl --user enable --now librespot.service   # if using Spotify
 systemctl --user enable --now mini-vinyl.service
 
