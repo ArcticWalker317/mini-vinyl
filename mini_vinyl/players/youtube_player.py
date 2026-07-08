@@ -14,15 +14,15 @@ that point doesn't stop it. Later plays of that tag use `pw-play`
 start on this hardware regardless of what it's playing, while pw-play
 plays raw PCM/WAV with essentially no startup cost.
 
-Lifting a tag mid-song remembers how far it got and resumes from there
-next time - but only once it's playing from the cached (near-instant)
-path. During the live phase, a fresh mpv process always pays the full
-yt-dlp resolve cost regardless of a --start offset, and wall-clock time
-elapsed there includes that resolve delay, not just audio playback - so
-tracking a "resume point" during the live phase would be both pointless
-(no time saved) and wrong (inflated by the resolve wait). The live phase
-always just starts from the beginning. A song that finishes naturally
-resets its cached resume point back to 0.
+Lifting a tag mid-song and placing the *same* tag back on resumes from
+where it got to (only once it's playing from the cached, near-instant
+path - during the live phase a fresh mpv process always pays the full
+yt-dlp resolve cost regardless of a --start offset, so there's nothing to
+gain by tracking position there). Only one resume point is ever
+remembered at a time: playing any *different* tag - even briefly -
+invalidates it, so going back to the original later always starts from
+the beginning rather than resuming a stale position. A song that finishes
+playing to completion also clears its own resume point.
 """
 
 import hashlib
@@ -46,7 +46,11 @@ class YoutubePlayer(Player):
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self._positions: dict[str, float] = {}  # url -> resume point, seconds
+        # The single most recently paused tag, if any. Starting a
+        # *different* tag invalidates this outright (see play()).
+        self._paused_url: str | None = None
+        self._paused_position = 0.0
+
         self._current_url: str | None = None
         self._current_base_position = 0.0
         self._current_is_cached = False
@@ -66,8 +70,18 @@ class YoutubePlayer(Player):
         self.stop()
         cache_path = self._cache_path(tag.id)
 
+        if tag.id == self._paused_url:
+            resume_at = self._paused_position
+        else:
+            resume_at = 0.0
+            if self._paused_url is not None:
+                # A different tag is starting - the old pause point is
+                # gone for good, not just superseded for now.
+                self._resume_path(self._paused_url).unlink(missing_ok=True)
+        self._paused_url = None
+        self._paused_position = 0.0
+
         if cache_path.exists():
-            resume_at = self._positions.get(tag.id, 0.0)
             play_path = cache_path
             if resume_at > 0:
                 trimmed = self._build_resume_clip(cache_path, tag.id, resume_at)
@@ -174,14 +188,14 @@ class YoutubePlayer(Player):
         if not finished_naturally:
             if self._current_is_cached and self._current_url and self._played_since is not None:
                 elapsed = time.time() - self._played_since
-                self._positions[self._current_url] = self._current_base_position + elapsed
+                self._paused_url = self._current_url
+                self._paused_position = self._current_base_position + elapsed
             self._proc.terminate()
             try:
                 self._proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
         elif self._current_is_cached and self._current_url:
-            self._positions.pop(self._current_url, None)
             self._resume_path(self._current_url).unlink(missing_ok=True)
 
         self._proc = None
