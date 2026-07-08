@@ -6,16 +6,22 @@ both fights over the BlueZ audio profile).
 Resolving+streaming a YouTube URL via yt-dlp is slow on a Pi Zero W's weak
 single-core CPU (tens of seconds), so the first play of a tag streams live
 via mpv and also downloads the full audio to disk as WAV in the
-background. Later plays of that tag use `pw-play` (PipeWire's own minimal
-player) instead of mpv - mpv's dependency stack (FFmpeg, libplacebo, etc.)
-takes several seconds of pure CPU time just to start on this hardware
-regardless of what it's playing, while pw-play plays raw PCM/WAV with
-essentially no startup cost.
+background (independent of the mpv process - lifting the tag early
+doesn't stop it). Later plays of that tag use `pw-play` (PipeWire's own
+minimal player) instead of mpv - mpv's dependency stack (FFmpeg,
+libplacebo, etc.) takes several seconds of pure CPU time just to start on
+this hardware regardless of what it's playing, while pw-play plays raw
+PCM/WAV with essentially no startup cost.
 
-Lifting a tag mid-song remembers how far it got (per URL); placing the
-same tag back on resumes from there. A different tag always starts from
-the beginning, and a song that finishes naturally resets its own resume
-point back to 0.
+Lifting a tag mid-song remembers how far it got and resumes from there
+next time - but only once it's playing from the cached (near-instant)
+path. During the live phase, a fresh mpv process always pays the full
+yt-dlp resolve cost regardless of a --start offset, and wall-clock time
+elapsed there includes that resolve delay, not just audio playback - so
+tracking a "resume point" during the live phase would be both pointless
+(no time saved) and wrong (inflated by the resolve wait). The live phase
+always just starts from the beginning. A song that finishes naturally
+resets its cached resume point back to 0.
 """
 
 import hashlib
@@ -40,7 +46,9 @@ class YoutubePlayer(Player):
         self._positions: dict[str, float] = {}  # url -> resume point, seconds
         self._current_url: str | None = None
         self._current_base_position = 0.0
+        self._current_is_cached = False
         self._played_since: float | None = None
+        self._caching_urls: set[str] = set()  # urls with a background cache job in flight
 
     def _cache_path(self, url: str) -> Path:
         key = hashlib.sha256(url.encode()).hexdigest()[:16]
@@ -53,9 +61,9 @@ class YoutubePlayer(Player):
     def play(self, tag: TagEntry) -> None:
         self.stop()
         cache_path = self._cache_path(tag.id)
-        resume_at = self._positions.get(tag.id, 0.0)
 
         if cache_path.exists():
+            resume_at = self._positions.get(tag.id, 0.0)
             play_path = cache_path
             if resume_at > 0:
                 trimmed = self._build_resume_clip(cache_path, tag.id, resume_at)
@@ -69,25 +77,29 @@ class YoutubePlayer(Player):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            self._current_is_cached = True
+            self._current_base_position = resume_at
         else:
-            print(f"[youtube] playing {tag.id} at {resume_at:.0f}s ({tag.title})")
-            mpv_args = [
-                "mpv",
-                "--no-video",
-                "--ytdl-format=bestaudio",
-                f"--ao={self._audio_output}",
-                "--really-quiet",
-            ]
-            if resume_at > 0:
-                mpv_args.append(f"--start={resume_at}")
-            mpv_args.append(tag.id)
+            print(f"[youtube] playing {tag.id} ({tag.title})")
             self._proc = subprocess.Popen(
-                mpv_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                [
+                    "mpv",
+                    "--no-video",
+                    "--ytdl-format=bestaudio",
+                    f"--ao={self._audio_output}",
+                    "--really-quiet",
+                    tag.id,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            self._cache_in_background(tag.id, cache_path)
+            self._current_is_cached = False
+            self._current_base_position = 0.0
+            if tag.id not in self._caching_urls:
+                self._caching_urls.add(tag.id)
+                self._cache_in_background(tag.id, cache_path)
 
         self._current_url = tag.id
-        self._current_base_position = resume_at
         self._played_since = time.time()
 
     def _build_resume_clip(self, cache_path: Path, url: str, start_seconds: float) -> Path | None:
@@ -107,7 +119,7 @@ class YoutubePlayer(Player):
                 dst.setparams(params)
                 dst.writeframes(remaining)
             return resume_path
-        except (wave.Error, OSError) as exc:
+        except (wave.Error, OSError, OverflowError, EOFError) as exc:
             print(f"[youtube] couldn't build resume clip, starting over: {exc}")
             return None
 
@@ -121,6 +133,11 @@ class YoutubePlayer(Player):
                 "-x",
                 "--audio-format",
                 "wav",
+                # Strip metadata (title/artist tags) so ffmpeg writes a plain
+                # fmt+data WAV - extra chunks confuse Python's `wave` module
+                # (used for resume-clip trimming) into misreading frame counts.
+                "--postprocessor-args",
+                "ffmpeg:-map_metadata -1",
                 "-o",
                 output_template,
                 url,
@@ -136,7 +153,7 @@ class YoutubePlayer(Player):
         finished_naturally = self._proc.poll() is not None
 
         if not finished_naturally:
-            if self._current_url and self._played_since is not None:
+            if self._current_is_cached and self._current_url and self._played_since is not None:
                 elapsed = time.time() - self._played_since
                 self._positions[self._current_url] = self._current_base_position + elapsed
             self._proc.terminate()
@@ -144,10 +161,11 @@ class YoutubePlayer(Player):
                 self._proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
-        elif self._current_url:
+        elif self._current_is_cached and self._current_url:
             self._positions.pop(self._current_url, None)
             self._resume_path(self._current_url).unlink(missing_ok=True)
 
         self._proc = None
         self._current_url = None
+        self._current_is_cached = False
         self._played_since = None
