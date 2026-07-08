@@ -42,6 +42,12 @@ class YoutubePlayer(Player):
                 [
                     "mpv",
                     "--no-video",
+                    # A local file needs none of mpv's default scripts
+                    # (ytdl_hook in particular) - loading it burns several
+                    # seconds importing yt-dlp's Python package on this
+                    # hardware for no reason, since there's no URL to
+                    # resolve.
+                    "--load-scripts=no",
                     f"--ao={self._audio_output}",
                     "--really-quiet",
                     str(cache_path),
