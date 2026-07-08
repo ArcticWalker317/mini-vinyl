@@ -5,13 +5,14 @@ both fights over the BlueZ audio profile).
 
 Resolving+streaming a YouTube URL via yt-dlp is slow on a Pi Zero W's weak
 single-core CPU (tens of seconds), so the first play of a tag streams live
-via mpv and also downloads the full audio to disk as WAV in the
-background (independent of the mpv process - lifting the tag early
-doesn't stop it). Later plays of that tag use `pw-play` (PipeWire's own
-minimal player) instead of mpv - mpv's dependency stack (FFmpeg,
-libplacebo, etc.) takes several seconds of pure CPU time just to start on
-this hardware regardless of what it's playing, while pw-play plays raw
-PCM/WAV with essentially no startup cost.
+via mpv. If the tag is still playing CACHE_AFTER_SECONDS later (i.e. it
+wasn't just a brief/accidental tap), a background download to disk as WAV
+starts too - independent of the mpv process, so lifting the tag after
+that point doesn't stop it. Later plays of that tag use `pw-play`
+(PipeWire's own minimal player) instead of mpv - mpv's dependency stack
+(FFmpeg, libplacebo, etc.) takes several seconds of pure CPU time just to
+start on this hardware regardless of what it's playing, while pw-play
+plays raw PCM/WAV with essentially no startup cost.
 
 Lifting a tag mid-song remembers how far it got and resumes from there
 next time - but only once it's playing from the cached (near-instant)
@@ -26,6 +27,7 @@ resets its cached resume point back to 0.
 
 import hashlib
 import subprocess
+import threading
 import time
 import wave
 from pathlib import Path
@@ -34,6 +36,7 @@ from mini_vinyl.config import TagEntry
 from mini_vinyl.players.base import Player
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "mini-vinyl" / "youtube"
+CACHE_AFTER_SECONDS = 3.0
 
 
 class YoutubePlayer(Player):
@@ -49,6 +52,7 @@ class YoutubePlayer(Player):
         self._current_is_cached = False
         self._played_since: float | None = None
         self._caching_urls: set[str] = set()  # urls with a background cache job in flight
+        self._cache_timer: threading.Timer | None = None
 
     def _cache_path(self, url: str) -> Path:
         key = hashlib.sha256(url.encode()).hexdigest()[:16]
@@ -96,11 +100,22 @@ class YoutubePlayer(Player):
             self._current_is_cached = False
             self._current_base_position = 0.0
             if tag.id not in self._caching_urls:
-                self._caching_urls.add(tag.id)
-                self._cache_in_background(tag.id, cache_path)
+                self._cache_timer = threading.Timer(
+                    CACHE_AFTER_SECONDS, self._maybe_start_caching, args=(tag.id, cache_path)
+                )
+                self._cache_timer.daemon = True
+                self._cache_timer.start()
 
         self._current_url = tag.id
         self._played_since = time.time()
+
+    def _maybe_start_caching(self, url: str, cache_path: Path) -> None:
+        # Fires CACHE_AFTER_SECONDS after play() started; only actually
+        # cache if this tag is still the one playing (wasn't lifted early -
+        # stop() cancels this timer, but guard here too against any race).
+        if self._current_url == url and url not in self._caching_urls:
+            self._caching_urls.add(url)
+            self._cache_in_background(url, cache_path)
 
     def _build_resume_clip(self, cache_path: Path, url: str, start_seconds: float) -> Path | None:
         try:
@@ -147,6 +162,10 @@ class YoutubePlayer(Player):
         )
 
     def stop(self) -> None:
+        if self._cache_timer is not None:
+            self._cache_timer.cancel()
+            self._cache_timer = None
+
         if self._proc is None:
             return
 
