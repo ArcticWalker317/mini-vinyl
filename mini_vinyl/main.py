@@ -59,6 +59,12 @@ def run_player() -> None:
 
     manager = PlayerManager(players)
 
+    # UID -> URI, populated as tags are read. Re-reading all 12 NDEF pages
+    # over I2C on every single tap is real overhead on this hardware; a
+    # tag's content doesn't change between taps, so remember it in memory
+    # and skip straight to playback next time (until this process restarts).
+    uri_cache: dict[str, str] = {}
+
     current_uid = None
     misses = 0
 
@@ -70,7 +76,11 @@ def run_player() -> None:
             if uid:
                 misses = 0
                 if uid != current_uid:
-                    uri = reader.read_ndef_uri()
+                    uri = uri_cache.get(uid)
+                    if uri is None:
+                        uri = reader.read_ndef_uri()
+                        if uri is not None:
+                            uri_cache[uid] = uri
                     if uri is None:
                         print(f"[main] no NDEF URI found on tag {uid}")
                     else:
