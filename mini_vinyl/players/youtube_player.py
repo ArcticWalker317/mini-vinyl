@@ -23,20 +23,36 @@ remembered at a time: playing any *different* tag - even briefly -
 invalidates it, so going back to the original later always starts from
 the beginning rather than resuming a stale position. A song that finishes
 playing to completion also clears its own resume point.
+
+A tag whose URL is a YouTube *playlist* (has a `list=` query param) gets
+its own path: every placement reshuffles and plays from track one - there
+is no mid-playlist resume, unlike single videos. The first time a
+playlist tag is seen, mpv streams it live with `--shuffle` (mpv resolves
+and shuffles the playlist itself), and if it's still playing
+CACHE_AFTER_SECONDS later a background yt-dlp job downloads every track
+in the playlist to its own directory. Once that finishes, later
+placements shuffle the list of local files in Python and play them back
+to back through `pw-play`, one track at a time.
 """
 
 import hashlib
+import random
 import subprocess
 import threading
 import time
 import wave
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from mini_vinyl.config import TagEntry
 from mini_vinyl.players.base import Player
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "mini-vinyl" / "youtube"
 CACHE_AFTER_SECONDS = 3.0
+
+
+def _is_playlist_url(url: str) -> bool:
+    return "list" in parse_qs(urlparse(url).query)
 
 
 class YoutubePlayer(Player):
@@ -58,6 +74,14 @@ class YoutubePlayer(Player):
         self._caching_urls: set[str] = set()  # urls with a background cache job in flight
         self._cache_timer: threading.Timer | None = None
 
+        # Playlist queue playback (cached path only - a background thread
+        # feeds tracks to pw-play one at a time). Playlists never resume,
+        # so there's no paused-position state to track for them.
+        self._current_is_playlist_queue = False
+        self._playlist_thread: threading.Thread | None = None
+        self._playlist_stop_event: threading.Event | None = None
+        self._caching_playlists: set[str] = set()  # playlist urls with a full download in flight
+
     def _cache_path(self, url: str) -> Path:
         key = hashlib.sha256(url.encode()).hexdigest()[:16]
         return self._cache_dir / f"{key}.wav"
@@ -66,18 +90,30 @@ class YoutubePlayer(Player):
         key = hashlib.sha256(url.encode()).hexdigest()[:16]
         return self._cache_dir / f"{key}.resume.wav"
 
+    def _playlist_dir(self, url: str) -> Path:
+        key = hashlib.sha256(url.encode()).hexdigest()[:16]
+        return self._cache_dir / "playlists" / key
+
+    def _cached_playlist_tracks(self, playlist_dir: Path) -> list[Path]:
+        if not (playlist_dir / ".complete").exists():
+            return []
+        return sorted(playlist_dir.glob("*.wav"))
+
     def play(self, tag: TagEntry) -> None:
         self.stop()
+
+        if tag.id != self._paused_url and self._paused_url is not None:
+            self._resume_path(self._paused_url).unlink(missing_ok=True)
+            self._paused_url = None
+            self._paused_position = 0.0
+
+        if _is_playlist_url(tag.id):
+            self._play_playlist(tag)
+            return
+
         cache_path = self._cache_path(tag.id)
 
-        if tag.id == self._paused_url:
-            resume_at = self._paused_position
-        else:
-            resume_at = 0.0
-            if self._paused_url is not None:
-                # A different tag is starting - the old pause point is
-                # gone for good, not just superseded for now.
-                self._resume_path(self._paused_url).unlink(missing_ok=True)
+        resume_at = self._paused_position if tag.id == self._paused_url else 0.0
         self._paused_url = None
         self._paused_position = 0.0
 
@@ -180,6 +216,25 @@ class YoutubePlayer(Player):
             self._cache_timer.cancel()
             self._cache_timer = None
 
+        if self._current_is_playlist_queue:
+            if self._playlist_stop_event is not None:
+                self._playlist_stop_event.set()
+            if self._proc is not None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+            if self._playlist_thread is not None:
+                self._playlist_thread.join(timeout=3)
+            self._playlist_thread = None
+            self._playlist_stop_event = None
+            self._proc = None
+            self._current_url = None
+            self._current_is_playlist_queue = False
+            self._played_since = None
+            return
+
         if self._proc is None:
             return
 
@@ -202,3 +257,109 @@ class YoutubePlayer(Player):
         self._current_url = None
         self._current_is_cached = False
         self._played_since = None
+
+    def _play_playlist(self, tag: TagEntry) -> None:
+        playlist_dir = self._playlist_dir(tag.id)
+        tracks = self._cached_playlist_tracks(playlist_dir)
+
+        if tracks:
+            random.shuffle(tracks)
+            print(f"[youtube] playing playlist {tag.id} from cache, shuffled ({len(tracks)} tracks)")
+            self._start_playlist_queue(tracks)
+        else:
+            print(f"[youtube] playing playlist {tag.id} live, shuffled")
+            self._proc = subprocess.Popen(
+                [
+                    "mpv",
+                    "--no-video",
+                    "--shuffle",
+                    "--ytdl-format=bestaudio",
+                    f"--ao={self._audio_output}",
+                    "--really-quiet",
+                    tag.id,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if tag.id not in self._caching_playlists:
+                self._cache_timer = threading.Timer(
+                    CACHE_AFTER_SECONDS,
+                    self._maybe_start_caching_playlist,
+                    args=(tag.id, playlist_dir),
+                )
+                self._cache_timer.daemon = True
+                self._cache_timer.start()
+
+        self._current_url = tag.id
+        self._played_since = time.time()
+
+    def _start_playlist_queue(self, tracks: list[Path]) -> None:
+        self._current_is_playlist_queue = True
+        self._proc = None
+        stop_event = threading.Event()
+        self._playlist_stop_event = stop_event
+        thread = threading.Thread(
+            target=self._run_playlist_queue, args=(tracks, stop_event), daemon=True
+        )
+        self._playlist_thread = thread
+        thread.start()
+
+    def _run_playlist_queue(self, tracks: list[Path], stop_event: threading.Event) -> None:
+        for track_path in tracks:
+            if stop_event.is_set():
+                return
+            proc = subprocess.Popen(
+                ["pw-play", str(track_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._proc = proc
+            proc.wait()
+            if stop_event.is_set():
+                return
+        # Whole shuffled playlist played through to the end naturally.
+        self._proc = None
+        self._current_url = None
+        self._current_is_playlist_queue = False
+
+    def _maybe_start_caching_playlist(self, url: str, playlist_dir: Path) -> None:
+        # Mirrors _maybe_start_caching: only start the (long) full-playlist
+        # download if the tag wasn't just a brief/accidental tap.
+        if self._current_url == url and url not in self._caching_playlists:
+            self._caching_playlists.add(url)
+            self._cache_playlist_in_background(url, playlist_dir)
+
+    def _cache_playlist_in_background(self, url: str, playlist_dir: Path) -> None:
+        playlist_dir.mkdir(parents=True, exist_ok=True)
+        output_template = str(playlist_dir / "%(playlist_index)s_%(id)s.%(ext)s")
+        proc = subprocess.Popen(
+            [
+                "yt-dlp",
+                "--yes-playlist",
+                "-f",
+                "bestaudio",
+                "-x",
+                "--audio-format",
+                "wav",
+                "--postprocessor-args",
+                "ffmpeg:-map_metadata -1",
+                "-o",
+                output_template,
+                url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        threading.Thread(
+            target=self._finish_playlist_caching, args=(proc, playlist_dir, url), daemon=True
+        ).start()
+
+    def _finish_playlist_caching(
+        self, proc: subprocess.Popen, playlist_dir: Path, url: str
+    ) -> None:
+        proc.wait()
+        if proc.returncode == 0:
+            (playlist_dir / ".complete").touch()
+        else:
+            print(f"[youtube] playlist download failed for {url} (exit {proc.returncode})")
+        self._caching_playlists.discard(url)

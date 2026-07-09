@@ -8,6 +8,13 @@ reader plays that URI's audio out to a paired Bluetooth speaker. Lifting
 the vinyl stops playback. There's no on-Pi tag-to-song mapping file - the
 Pi just reads whatever URI is written on the tag.
 
+A tag can also hold a YouTube **playlist** URL (any URL with a `list=`
+parameter, e.g. copied from "Share -> Copy link" while viewing a
+playlist). The first tap streams it live in shuffled order while
+downloading every track in the background; once that download finishes,
+every later tap re-shuffles and plays the whole playlist from the
+downloaded files, starting from track one each time.
+
 ## Hardware
 
 - Raspberry Pi Zero W
@@ -109,7 +116,10 @@ Fill in `config/secrets.env` (Bluetooth MAC, Spotify credentials).
 Using a phone NFC-writer app (e.g. "NFC Tools" on iOS/Android), write a
 single **URL/URI record** to each NTAG213/215/216 tag:
 
-- YouTube: the full video URL, e.g. `https://www.youtube.com/watch?v=...`
+- YouTube video: the full video URL, e.g. `https://www.youtube.com/watch?v=...`
+- YouTube playlist: the full playlist URL, e.g.
+  `https://www.youtube.com/playlist?list=...` (any URL with a `list=`
+  parameter works, including a `watch?v=...&list=...` link)
 - Spotify: a Spotify URI, e.g. `spotify:album:4LH4d3cOWNNsVw41Gqt2kv`
   (get this from the Spotify app: Share -> Copy Spotify URI)
 
@@ -172,7 +182,10 @@ or speaker address differ from the placeholders.
   slow on Zero W hardware, so the first play of a tag also downloads the
   full audio to `~/.cache/mini-vinyl/youtube/` in the background; later
   plays of that tag find the cached file and start instantly, with no
-  live resolution involved.
+  live resolution involved. A playlist URL (`list=...`) follows the same
+  live-then-cache pattern, but caches every track in the playlist to
+  `~/.cache/mini-vinyl/youtube/playlists/`; every tap - cached or not -
+  plays the tracks back in a freshly shuffled order.
 - `mini_vinyl/players/spotify_player.py` uses the Spotify Web API
   (`spotipy`) to tell the `librespot` Spotify Connect instance running on
   the Pi what to play; `librespot` itself does the audio decode/output,
