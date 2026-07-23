@@ -243,7 +243,7 @@
     <div class="home-buttons">
       <button type="button" class="wide" id="nav-add">Add Songs</button>
       <button type="button" class="wide" id="nav-library">View Library</button>
-      <button type="button" class="wide secondary" id="nav-playlist">Create Playlist</button>
+      <button type="button" class="wide secondary" id="nav-playlist">Playlists</button>
     </div>
   </section>
 
@@ -364,7 +364,16 @@ document.getElementById("nav-playlist").addEventListener("click", () => {
 document.getElementById("back-from-add").addEventListener("click", () => showScreen("screen-home"));
 document.getElementById("back-from-library").addEventListener("click", () => showScreen("screen-home"));
 document.getElementById("back-from-playlists").addEventListener("click", () => showScreen("screen-home"));
-document.getElementById("back-from-playlist-detail").addEventListener("click", () => showScreen("screen-playlists"));
+document.getElementById("back-from-playlist-detail").addEventListener("click", async () => {
+  // A playlist that was just created and never got a song added has no
+  // reason to stick around - clean it up on the way out rather than
+  // leaving a dead empty entry in the list.
+  if (currentPlaylistCode && currentPlaylistSongCount === 0) {
+    await fetch(`/api/playlists/${encodeURIComponent(currentPlaylistCode)}`, { method: "DELETE" });
+  }
+  showScreen("screen-playlists");
+  refreshPlaylists();
+});
 
 document.getElementById("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -516,6 +525,7 @@ function renderLibraryEntry(entry) {
 // ---- Playlists ----
 
 let currentPlaylistCode = null;
+let currentPlaylistSongCount = 0;
 let downloadedSongsCache = []; // "ready" library entries, refreshed on entering a playlist's detail screen
 
 document.getElementById("create-playlist-form").addEventListener("submit", async (e) => {
@@ -586,8 +596,15 @@ async function loadPlaylistDetail() {
   try {
     const res = await fetch(`/api/playlists/${encodeURIComponent(currentPlaylistCode)}`);
     const playlist = await res.json();
-    if (playlist.error) return;
+    if (playlist.error) {
+      // The playlist is gone (e.g. its last song was removed from
+      // another tab) - nothing left to show here.
+      showScreen("screen-playlists");
+      refreshPlaylists();
+      return;
+    }
 
+    currentPlaylistSongCount = playlist.songs.length;
     playlistDetailTitleEl.textContent = playlist.name;
     playlistSongsEl.innerHTML = "";
     playlistSongsEmptyEl.hidden = playlist.songs.length > 0;
@@ -613,11 +630,18 @@ function renderPlaylistSong(song) {
   li.querySelector(".item-title").textContent = song.title;
   li.querySelector(".item-sub").textContent = song.artist || "";
   li.querySelector("button").addEventListener("click", async () => {
-    await fetch(
+    const res = await fetch(
       `/api/playlists/${encodeURIComponent(currentPlaylistCode)}/songs/${encodeURIComponent(song.code)}`,
       { method: "DELETE" }
     );
-    loadPlaylistDetail();
+    const data = await res.json();
+    if (data.deleted) {
+      // That was the last song - the playlist gets deleted along with it.
+      showScreen("screen-playlists");
+      refreshPlaylists();
+    } else {
+      loadPlaylistDetail();
+    }
   });
   return li;
 }

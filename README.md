@@ -175,8 +175,8 @@ instant one.
 You can build your own playlists out of songs you've already downloaded -
 this is the only way to make a playlist tag; a YouTube playlist URL
 written directly to a tag is not specially handled. From the home
-screen, **Create Playlist** takes you to a list of your playlists with a
-name field above it to start a new one. Opening a playlist shows its
+screen, **Playlists** takes you to a list of your playlists with a name
+field above it to start a new one. Opening a playlist shows its
 current songs (each with a **Remove** button) and a search box that
 filters your already-downloaded library by title/artist - tap **Add** on
 a match to drop it in. There's no reordering, since playback always

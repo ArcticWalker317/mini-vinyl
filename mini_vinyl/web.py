@@ -127,7 +127,25 @@ def create_app(library: Library, playlist_store: PlaylistStore, write_coordinato
         playlist = playlist_store.remove_song(code, song_code)
         if playlist is None:
             return {"error": "unknown playlist"}, 404
+        if not playlist["songs"]:
+            # A playlist is never meant to sit empty - removing its last
+            # song deletes it outright rather than leaving a dead entry.
+            playlist_store.delete(code)
+            return {"deleted": True}
         return enrich_playlist(playlist)
+
+    @app.delete("/api/playlists/<code>")
+    def delete_playlist(code: str):
+        # Only ever used to clean up a playlist that was just created and
+        # never got a song added (see the frontend's back-button
+        # handling) - not a general-purpose delete.
+        playlist = playlist_store.get(code)
+        if playlist is None:
+            return {"error": "unknown playlist"}, 404
+        if playlist["songs"]:
+            return {"error": "playlist is not empty"}, 400
+        playlist_store.delete(code)
+        return {"deleted": True}
 
     @app.post("/api/write")
     def write_tag():

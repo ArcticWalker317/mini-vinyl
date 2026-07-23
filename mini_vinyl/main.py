@@ -108,6 +108,17 @@ def run_player() -> None:
     # multi-page NDEF re-read (and a repeated log line) on every single
     # poll, ~7x/second, instead of just once until it's lifted.
     blank_uid = None
+    # The last uid a write was attempted against, if any - regardless of
+    # whether that attempt succeeded, was refused ("tag already has
+    # data"), or failed outright. Without this, a tag sitting on the
+    # reader through a refused write (e.g. while the user is deciding
+    # whether to hit "Overwrite") falls through to normal tag handling on
+    # the very next poll - since the resolved write request is no longer
+    # "waiting" and take_pending() stops returning it - and starts
+    # playing whatever old song/playlist is still written on it. Cleared
+    # only once the tag is actually lifted, so a fresh placement of the
+    # same physical tag later behaves normally again.
+    write_attempted_uid = None
     misses = 0
 
     print("Ready. Waiting for tags...")
@@ -120,11 +131,12 @@ def run_player() -> None:
                 pending = write_coordinator.take_pending()
                 if pending is not None:
                     print(f"[main] writing tag with code {pending.code!r}")
+                    write_attempted_uid = uid
                     if _handle_pending_write(reader, write_coordinator, pending):
                         uri_cache[uid] = pending.code
                         current_uid = uid
                         blank_uid = None
-                elif uid != current_uid and uid != blank_uid:
+                elif uid != current_uid and uid != blank_uid and uid != write_attempted_uid:
                     uri = uri_cache.get(uid)
                     if uri is None:
                         uri = reader.read_ndef_uri()
@@ -144,6 +156,7 @@ def run_player() -> None:
                         manager.handle_tag_absent()
                         current_uid = None
                     blank_uid = None
+                    write_attempted_uid = None
 
             time.sleep(0.05)
     except KeyboardInterrupt:

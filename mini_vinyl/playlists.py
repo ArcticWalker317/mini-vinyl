@@ -11,6 +11,12 @@ YouTube playlist *URL* is not supported; only individual video URLs are.
 A local playlist is built by hand from songs you've already got, then
 shuffle-played through YoutubePlayer's queue mechanism (see
 YoutubePlayer._play_local_playlist) once it's written to a tag.
+
+A playlist is never meant to sit empty - mini_vinyl/web.py deletes one
+outright the moment its last song is removed (or the user backs out of
+one that was just created and never got a song added), rather than
+leaving a dead entry around. delete() itself has no such opinion - it's
+just storage - the empty-means-gone policy lives in the web layer.
 """
 
 import json
@@ -92,6 +98,14 @@ class PlaylistStore:
                 playlist["songs"].remove(song_code)
                 self._save_locked()
             return dict(playlist)
+
+    def delete(self, code: str) -> bool:
+        with self._lock:
+            if code not in self._playlists:
+                return False
+            del self._playlists[code]
+            self._save_locked()
+            return True
 
     def track_paths(self, code: str) -> list[Path]:
         """Resolves a playlist's song codes to their on-disk wav paths,
