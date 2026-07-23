@@ -2,26 +2,40 @@
 and the web "search & add" UI (mini_vinyl/web.py).
 
 Every downloaded song - whether triggered by tapping an unrecognized
-YouTube-URL tag and leaving it playing for a few seconds, or by clicking
-Add on a search result - ends up as a `<song_title>-<artist>.wav` file in
-the cache directory, recorded in `library.json` alongside it. A "code" is
+YouTube-URL tag and leaving it playing for a few seconds, or by adding it
+from the web UI - ends up as a `<song_title>-<artist>.wav` file in the
+cache directory, recorded in `library.json` alongside it. A "code" is
 just that filename without the `.wav` extension (e.g.
 `the_scientist-coldplay`); it's what gets burned onto a physical tag by
 the web UI's write flow and looked up here at playback time.
 
-The Add flow needs to hand a code back to the browser fast, well before
-the real (slow, tens-of-seconds-on-a-Pi-Zero-W) download finishes, so the
-user can go write a tag immediately. get_or_reserve() claims a unique
-filename up front from a quick metadata probe, persisting it with
-status="reserved" right away; the real download later renames straight
-into that pre-claimed path (finalize()) without ever re-deriving the
-name. A failed download's reservation is never freed for reuse (see
-get_or_reserve's docstring) - once a code might be sitting on a physical
-tag, that filename is permanently spoken for, download or no download.
+Adding a song from the web UI is a two-phase, queue-backed process rather
+than something that happens inline in the HTTP request, because a single
+probe (metadata-only, still needed to compute a code) can take the better
+part of a minute on a Pi Zero W's weak single core (see probe()), and the
+whole point is to let someone queue up a stack of songs from their phone
+and walk away - firing off 20 requests that each block on their own
+yt-dlp probe would either serialize into a very long wait or, if fired
+concurrently, pile up several yt-dlp/ffmpeg processes competing for that
+one weak core at once. So enqueue() just records the url with
+status="queued" and returns immediately; a single background worker
+thread (started in __init__, alive for the process's lifetime) drains the
+queue strictly one url at a time - probe, reserve a unique filename/code,
+download, finalize - before moving to the next. Entries persist through
+every stage (see _status_dict_locked's status values), so the web UI can
+poll list_entries() to show progress and is free to be closed and reopened
+- or the phone turned off entirely - without losing anything; the queue
+itself is also durable across a process restart (see _requeue_unfinished).
+
+A failed download's reservation (once one exists) is never freed for
+reuse - once a code might be sitting on a physical tag, that filename is
+permanently spoken for, download or no download; a retry just resumes
+from the download step rather than re-probing or re-slugifying.
 """
 
 import hashlib
 import json
+import queue
 import re
 import subprocess
 import threading
@@ -57,8 +71,8 @@ def _pick_artist(info: dict) -> str:
     return "unknown"
 
 
-def _code_of(entry: dict) -> str:
-    return Path(entry["file"]).stem
+def _code_of(entry: dict) -> str | None:
+    return Path(entry["file"]).stem if entry.get("file") else None
 
 
 class Library:
@@ -72,6 +86,14 @@ class Library:
 
         self._in_flight: set[str] = set()  # single-track urls with a download running
         self._caching_playlists: set[str] = set()  # playlist urls with a download running
+
+        # Single sequential worker: on a one-core Pi Zero W, running two
+        # yt-dlp/ffmpeg processes "concurrently" doesn't get anything done
+        # faster, just makes both slower - so the add-queue is drained one
+        # url at a time, on purpose.
+        self._download_queue: queue.Queue[str] = queue.Queue()
+        threading.Thread(target=self._worker_loop, daemon=True).start()
+        self._requeue_unfinished()
 
     @property
     def cache_dir(self) -> Path:
@@ -102,12 +124,24 @@ class Library:
         }
         self._save_locked()
 
+    def _status_dict_locked(self, entry: dict) -> dict:
+        return {
+            "url": entry["url"],
+            "status": entry["status"],
+            "code": _code_of(entry),
+            "title": entry.get("title"),
+            "artist": entry.get("artist"),
+            "detail": entry.get("detail", ""),
+        }
+
     def _unique_filename_locked(self, dest_dir: Path, filename: str, *, check_catalog: bool) -> str:
         def taken(name: str) -> bool:
             if (dest_dir / name).exists():
                 return True
             if check_catalog:
-                return any(Path(e["file"]) == Path(name) for e in self._entries.values())
+                return any(
+                    e.get("file") and Path(e["file"]) == Path(name) for e in self._entries.values()
+                )
             return False
 
         if not taken(filename):
@@ -123,18 +157,18 @@ class Library:
     def get_by_url(self, url: str) -> dict | None:
         with self._lock:
             entry = self._entries.get(url)
-            if entry is None or entry.get("status", "ready") != "ready":
+            if entry is None or entry.get("status") != "ready":
                 return None
             return entry if (self._cache_dir / entry["file"]).exists() else None
 
     def get_by_code(self, code: str) -> dict | None:
         # Only top-level cache_dir entries are code-addressable - playlist
         # tracks live under playlists/<hash>/ (more than one path part) and
-        # never went through get_or_reserve(), so they're excluded here by
+        # never go through the add-queue, so they're excluded here by
         # construction rather than an explicit check.
         with self._lock:
             for entry in self._entries.values():
-                if entry.get("status", "ready") != "ready":
+                if entry.get("status") != "ready" or not entry.get("file"):
                     continue
                 file_rel = Path(entry["file"])
                 if len(file_rel.parts) == 1 and file_rel.stem == code:
@@ -158,7 +192,7 @@ class Library:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=45,
         )
         results = []
         for line in proc.stdout.strip().splitlines():
@@ -182,46 +216,117 @@ class Library:
     def probe(self, url: str) -> dict:
         """Full (non-flat) metadata-only fetch. Slower than search()'s flat
         extraction but reliably surfaces a real `artist` tag when one
-        exists, unlike flat-playlist search results."""
+        exists, unlike flat-playlist search results. Still skips the
+        download+ffmpeg step, but yt-dlp's YouTube signature-decryption
+        runs in pure Python, so this can take the better part of a minute
+        on a Pi Zero W's weak single core - nowhere near instant, but well
+        short of the actual download's "tens of seconds" (plus ffmpeg
+        transcoding) on top."""
         proc = subprocess.run(
             ["yt-dlp", "-j", "--skip-download", "--no-warnings", "--quiet", url],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=90,
         )
         if proc.returncode != 0 or not proc.stdout.strip():
             raise RuntimeError(proc.stderr.strip()[-500:] or "yt-dlp probe failed")
         info = json.loads(proc.stdout.strip().splitlines()[-1])
         return {"title": info.get("title") or url, "artist": _pick_artist(info)}
 
-    def get_or_reserve(self, url: str, title: str, artist: str) -> str:
-        """Returns the code for `url`, claiming a unique filename the
-        first time it's seen. Idempotent - repeat calls for the same url
-        always return the original code, regardless of whether that
-        reservation ever finished downloading. This is deliberate: a
-        code may already be burned onto a physical tag by the time a
-        download fails, so its filename can never be handed to a
-        different song later - a retry of the same title/artist gets a
-        fresh `_2` suffix instead of reusing a dead reservation."""
+    def enqueue(self, url: str) -> dict:
+        """Adds `url` to the add-queue if it isn't already known, or - if
+        its last attempt failed - re-queues it for another try. Returns
+        its current status immediately; never blocks on probing or
+        downloading, which happen later on the background worker."""
         with self._lock:
             entry = self._entries.get(url)
-            if entry is not None:
-                return _code_of(entry)
-
-            filename = self._unique_filename_locked(
-                self._cache_dir,
-                f"{_slugify(title, _MAX_TITLE_SLUG_LEN)}-{_slugify(artist, _MAX_ARTIST_SLUG_LEN)}.wav",
-                check_catalog=True,
-            )
-            self._entries[url] = {
-                "title": title,
-                "artist": artist,
-                "url": url,
-                "file": filename,
-                "status": "reserved",
-            }
+            if entry is not None and entry["status"] != "failed":
+                return self._status_dict_locked(entry)
+            if entry is None:
+                self._entries[url] = {
+                    "url": url,
+                    "status": "queued",
+                    "title": None,
+                    "artist": None,
+                    "file": None,
+                    "detail": "",
+                }
+            else:
+                entry["status"] = "queued"
+                entry["detail"] = ""
             self._save_locked()
-            return Path(filename).stem
+            status = self._status_dict_locked(self._entries[url])
+        self._download_queue.put(url)
+        return status
+
+    def list_entries(self) -> list[dict]:
+        """Everything ever added through the web UI, most recently added
+        first - playlist tracks excluded (see get_by_code)."""
+        with self._lock:
+            entries = [
+                self._status_dict_locked(e)
+                for e in self._entries.values()
+                if not e.get("file") or len(Path(e["file"]).parts) == 1
+            ]
+        entries.reverse()
+        return entries
+
+    def _requeue_unfinished(self) -> None:
+        # Recovers the queue across a process restart - anything that
+        # hadn't reached "ready" or "failed" yet gets another pass.
+        with self._lock:
+            urls = [
+                url
+                for url, e in self._entries.items()
+                if e["status"] in ("queued", "probing", "reserved", "downloading")
+            ]
+        for url in urls:
+            self._download_queue.put(url)
+
+    def _worker_loop(self) -> None:
+        while True:
+            url = self._download_queue.get()
+            try:
+                self._process_queued(url)
+            except Exception as exc:  # a wedged queue is worse than a logged miss
+                print(f"[library] add-queue entry {url} raised {exc!r}")
+                self.mark_failed(url, str(exc))
+
+    def _process_queued(self, url: str) -> None:
+        # Whether a filename/code is already claimed - the ground truth
+        # for "does this need probing" - is entry["file"], not status:
+        # enqueue() resets a retried entry's status back to "queued" (so
+        # _requeue_unfinished's status-based scan still picks it up after
+        # a restart), even though it may already have a reserved file
+        # from a previous, later-failed attempt.
+        with self._lock:
+            entry = self._entries.get(url)
+            already_reserved = entry is not None and bool(entry.get("file"))
+        if not already_reserved:
+            with self._lock:
+                entry = self._entries.get(url)
+                if entry is None:
+                    return
+                entry["status"] = "probing"
+                self._save_locked()
+            try:
+                info = self.probe(url)
+            except (subprocess.TimeoutExpired, RuntimeError) as exc:
+                self.mark_failed(url, str(exc))
+                return
+            with self._lock:
+                filename = self._unique_filename_locked(
+                    self._cache_dir,
+                    f"{_slugify(info['title'], _MAX_TITLE_SLUG_LEN)}-"
+                    f"{_slugify(info['artist'], _MAX_ARTIST_SLUG_LEN)}.wav",
+                    check_catalog=True,
+                )
+                entry = self._entries.get(url)
+                if entry is None:
+                    return
+                entry.update(title=info["title"], artist=info["artist"], file=filename, status="reserved")
+                self._save_locked()
+        self.download_reserved(url)
 
     def mark_downloading(self, url: str) -> None:
         with self._lock:
@@ -240,11 +345,11 @@ class Library:
 
     def finalize(self, url: str, tmp_path: Path) -> Path | None:
         """Renames a completed download into its pre-reserved final path
-        and marks the entry ready. `url` must have already gone through
-        get_or_reserve()."""
+        and marks the entry ready. `url` must already have a claimed
+        filename (status in _HAS_CODE_STATUSES)."""
         with self._lock:
             entry = self._entries.get(url)
-            if entry is None or not tmp_path.exists():
+            if entry is None or not entry.get("file") or not tmp_path.exists():
                 return None
             final_path = self._cache_dir / entry["file"]
             tmp_path.rename(final_path)
@@ -258,23 +363,26 @@ class Library:
             entry = self._entries.get(url)
             if entry is None:
                 return {"status": "unknown"}
-            return {"status": entry["status"], "code": _code_of(entry), "detail": entry.get("detail", "")}
+            return self._status_dict_locked(entry)
 
     def status_for_code(self, code: str) -> dict:
         with self._lock:
             for entry in self._entries.values():
-                if _code_of(entry) == code and len(Path(entry["file"]).parts) == 1:
-                    return {"status": entry["status"], "url": entry["url"], "detail": entry.get("detail", "")}
+                if entry.get("file") and _code_of(entry) == code and len(Path(entry["file"]).parts) == 1:
+                    return self._status_dict_locked(entry)
             return {"status": "unknown"}
 
     def download_reserved(self, url: str) -> None:
-        """Real download for a url already claimed via get_or_reserve():
+        """Real download for a url that already has a claimed filename:
         renames straight into the pre-reserved path, ignoring the
         download's own title/artist metadata so a probe/download
         discrepancy can never change a code already handed to the user.
-        Meant to be run in a background thread."""
+        Called from the add-queue worker (already sequential), but also
+        guards against overlapping with a concurrent tap-triggered cache
+        of the same url via _in_flight."""
         with self._lock:
-            if url in self._in_flight or url not in self._entries:
+            entry = self._entries.get(url)
+            if url in self._in_flight or entry is None or not entry.get("file"):
                 return
             self._in_flight.add(url)
         self.mark_downloading(url)
@@ -315,7 +423,7 @@ class Library:
     def download_and_catalog(self, url: str) -> None:
         """Tap-triggered background cache for a raw-URL tag: derives
         title/artist from the download itself, since this flow never
-        hands a code to anyone ahead of time (unlike download_reserved)."""
+        hands a code to anyone ahead of time (unlike the add-queue)."""
         with self._lock:
             if url in self._in_flight or self.get_by_url(url) is not None:
                 return

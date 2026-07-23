@@ -146,17 +146,32 @@ http://<hostname>.local:8080
 Options -> Hostname, e.g. `mini-vinyl.local`. Run `hostname` on the Pi if
 you're not sure what it's currently set to.)
 
-Search for a song, tap **Add** - the Pi starts downloading it in the
-background and the page shows a short code (the eventual filename, minus
-`.wav`). While that's up, place a **blank** NTAG213/215/216 tag on the
-Pi's own reader; it writes the code onto the tag directly (refusing if
-the tag already has data on it, so it won't overwrite an existing vinyl
-by accident). Tap that tag to the reader any time afterward to play the
-song - no further pairing needed, the code is all it takes.
+Search for a song and tap **Add** - it's queued instantly, so you can
+search and add a whole stack of songs back to back (or across several
+searches) without waiting on any of them. The Pi works through the queue
+one song at a time in the background - fetching its info, then
+downloading it - entirely on its own, so it's fine to close the page or
+turn your phone off once everything you want is queued; it'll all still
+be there, further along, whenever you check back.
+
+The **Your library** section on the same page lists everything you've
+added and its current status (queued / fetching info / downloading /
+ready), refreshing every few seconds. Once a song reaches **Ready**, tap
+**Write tag** next to it and place a **blank** NTAG213/215/216 tag on the
+Pi's own reader; it writes that song's code onto the tag directly
+(refusing if the tag already has data on it, so it won't overwrite an
+existing vinyl by accident). Tap that tag to the reader any time
+afterward to play the song - no further pairing needed, the code is all
+it takes. If a song shows **Failed**, hit **Retry** - it picks back up
+without re-fetching info it already has.
 
 Only single videos can be added this way; playlists still need to be
 written manually (see above). No auth, no HTTPS - this is meant for a
-trusted home network only, not for exposing beyond it.
+trusted home network only, not for exposing beyond it. Fetching a song's
+info (needed before it can even be queued for download) can itself take
+the better part of a minute per song on this hardware, so a big batch add
+is genuinely a "queue it and come back later" operation, not an
+instant one.
 
 ### Run it
 
@@ -204,13 +219,17 @@ or speaker address differ from the placeholders.
   read-and-play handling.
 - `mini_vinyl/library.py`'s `Library` owns the song catalog
   (`library.json`) and all downloading: looking up a cached file by URL or
-  by code, reserving a `<song_title>-<artist>.wav` filename/code up front
-  so the web UI can hand it back before the real download finishes, and
-  running the actual `yt-dlp` downloads (for both a tapped-and-cached
-  URL-tag and the web UI's Add flow) and playlist caching in the
-  background. It's shared between `YoutubePlayer` and `web.py` so both
-  read and write the same in-memory catalog with no cross-process locking
-  needed.
+  by code, and running the actual `yt-dlp` downloads (for a
+  tapped-and-cached URL-tag, the web UI's Add flow, and playlist caching)
+  in the background. The web UI's Add flow (`enqueue()`) just records a
+  url and returns immediately; a single persistent background worker
+  thread drains that queue one song at a time - fetching its info,
+  claiming a unique `<song_title>-<artist>.wav` filename/code, then
+  downloading - since running more than one `yt-dlp`/`ffmpeg` process at
+  once wouldn't actually go any faster on a Pi Zero W's single weak core,
+  just contend for it. `Library` is shared between `YoutubePlayer` and
+  `web.py` so both read and write the same in-memory catalog with no
+  cross-process locking needed.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
   `yt-dlp` under the hood) and plays audio out through PipeWire, which
   owns the Bluetooth speaker's A2DP sink. A tag's content is either a raw

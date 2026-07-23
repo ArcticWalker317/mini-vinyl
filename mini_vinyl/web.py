@@ -3,10 +3,15 @@ the same process as the NFC poll loop (see main.py) so both share one
 in-memory Library/WriteCoordinator with no cross-process locking needed.
 No auth - meant for a trusted home LAN only, reached via mDNS
 (http://<hostname>.local:8080), never exposed beyond it.
+
+Adding a song only ever enqueues it (see Library.enqueue) - the actual
+probing/downloading happens later on Library's own background worker, so
+a burst of Adds returns instantly no matter how many songs are queued up,
+and finishes on its own even if nobody's watching. /api/library is how
+the frontend finds out what's ready to have a tag written for it.
 """
 
 import subprocess
-import threading
 
 from flask import Flask, request, send_from_directory
 
@@ -38,24 +43,11 @@ def create_app(library: Library, write_coordinator: WriteCoordinator) -> Flask:
         url = (data.get("url") or "").strip()
         if not url:
             return {"error": "url is required"}, 400
+        return library.enqueue(url)
 
-        status = library.status_for_url(url)
-        if status["status"] == "unknown":
-            try:
-                info = library.probe(url)
-            except (subprocess.TimeoutExpired, RuntimeError) as exc:
-                return {"error": f"couldn't fetch video info: {exc}"}, 502
-            code = library.get_or_reserve(url, info["title"], info["artist"])
-            threading.Thread(target=library.download_reserved, args=(url,), daemon=True).start()
-            return {"code": code, "status": "reserved"}
-
-        if status["status"] in ("reserved", "failed"):
-            # Not currently running (a fresh reservation, or a previous
-            # attempt that failed) - (re)start the download under the same
-            # already-claimed code.
-            threading.Thread(target=library.download_reserved, args=(url,), daemon=True).start()
-
-        return {"code": status["code"], "status": status["status"]}
+    @app.get("/api/library")
+    def list_library():
+        return {"entries": library.list_entries()}
 
     @app.get("/api/songs/<code>/status")
     def song_status(code: str):

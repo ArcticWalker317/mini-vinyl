@@ -46,6 +46,13 @@
     font-size: 1.3rem;
     margin: 0.5rem 0 1rem;
   }
+  h2.section {
+    font-size: 1rem;
+    color: var(--muted);
+    margin: 2rem 0 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
   form#search-form {
     display: flex;
     gap: 0.5rem;
@@ -67,6 +74,7 @@
     background: var(--accent);
     color: var(--accent-fg);
     cursor: pointer;
+    white-space: nowrap;
   }
   button:disabled { opacity: 0.5; cursor: default; }
   button.secondary {
@@ -74,7 +82,11 @@
     color: var(--fg);
     border: 1px solid var(--border);
   }
-  ul#results {
+  button.small {
+    font-size: 0.85rem;
+    padding: 0.4rem 0.7rem;
+  }
+  ul.list {
     list-style: none;
     margin: 1rem 0 0;
     padding: 0;
@@ -82,7 +94,7 @@
     flex-direction: column;
     gap: 0.5rem;
   }
-  li.result {
+  li.item {
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -91,25 +103,30 @@
     border-radius: 10px;
     padding: 0.6rem 0.8rem;
   }
-  .result-text { flex: 1; min-width: 0; }
-  .result-title {
+  .item-text { flex: 1; min-width: 0; }
+  .item-title {
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .result-uploader {
+  .item-sub {
     color: var(--muted);
     font-size: 0.85rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .item-sub.err { color: var(--err); }
   #status-msg {
     color: var(--muted);
     font-size: 0.9rem;
     margin-top: 0.5rem;
     min-height: 1.2em;
+  }
+  #library-empty {
+    color: var(--muted);
+    font-size: 0.9rem;
   }
   .overlay {
     position: fixed;
@@ -144,15 +161,10 @@
   }
   .write-status {
     font-size: 0.95rem;
-    margin-bottom: 0.5rem;
+    margin-bottom: 1rem;
   }
   .write-status.ok { color: var(--ok); }
   .write-status.err { color: var(--err); }
-  .download-status {
-    font-size: 0.85rem;
-    color: var(--muted);
-    margin-bottom: 1rem;
-  }
   .modal-actions {
     display: flex;
     gap: 0.5rem;
@@ -168,15 +180,18 @@
     <button type="submit">Search</button>
   </form>
   <div id="status-msg"></div>
-  <ul id="results"></ul>
+  <ul class="list" id="results"></ul>
+
+  <h2 class="section">Your library</h2>
+  <div id="library-empty">Nothing added yet.</div>
+  <ul class="list" id="library"></ul>
 </main>
 
 <div class="overlay" id="overlay" hidden>
   <div class="modal">
-    <h2 id="modal-title">Adding song&hellip;</h2>
+    <h2>Write this tag</h2>
     <div class="code" id="modal-code"></div>
-    <div class="write-status" id="write-status">Place a blank tag on the mini-vinyl reader now.</div>
-    <div class="download-status" id="download-status"></div>
+    <div class="write-status" id="write-status"></div>
     <div class="modal-actions">
       <button type="button" class="secondary" id="retry-write" hidden>Retry write</button>
       <button type="button" class="secondary" id="close-modal">Close</button>
@@ -187,20 +202,24 @@
 <script>
 const resultsEl = document.getElementById("results");
 const statusMsgEl = document.getElementById("status-msg");
+const libraryEl = document.getElementById("library");
+const libraryEmptyEl = document.getElementById("library-empty");
 const overlayEl = document.getElementById("overlay");
-const modalTitleEl = document.getElementById("modal-title");
 const modalCodeEl = document.getElementById("modal-code");
 const writeStatusEl = document.getElementById("write-status");
-const downloadStatusEl = document.getElementById("download-status");
 const retryWriteBtn = document.getElementById("retry-write");
 const closeModalBtn = document.getElementById("close-modal");
 
-let pollHandles = [];
+const STATUS_LABELS = {
+  queued: "Queued…",
+  probing: "Fetching info…",
+  reserved: "Starting download…",
+  downloading: "Downloading…",
+  ready: "Ready",
+  failed: "Failed",
+};
 
-function stopPolling() {
-  pollHandles.forEach(clearInterval);
-  pollHandles = [];
-}
+let writePollHandle = null;
 
 document.getElementById("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -228,59 +247,110 @@ document.getElementById("search-form").addEventListener("submit", async (e) => {
 
 function renderResult(r) {
   const li = document.createElement("li");
-  li.className = "result";
+  li.className = "item";
   li.innerHTML = `
-    <div class="result-text">
-      <div class="result-title"></div>
-      <div class="result-uploader"></div>
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
     </div>
-    <button type="button">Add</button>
+    <button type="button" class="small">Add</button>
   `;
-  li.querySelector(".result-title").textContent = r.title;
-  li.querySelector(".result-uploader").textContent = r.uploader;
-  li.querySelector("button").addEventListener("click", () => addSong(r.url));
+  li.querySelector(".item-title").textContent = r.title;
+  li.querySelector(".item-sub").textContent = r.uploader;
+  const btn = li.querySelector("button");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+      await fetch("/api/songs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: r.url }),
+      });
+      btn.textContent = "Queued ✓";
+      refreshLibrary();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Add";
+      statusMsgEl.textContent = "Couldn't reach the Pi.";
+    }
+  });
   return li;
 }
 
-async function addSong(url) {
-  openModal();
-  modalTitleEl.textContent = "Adding song…";
-  modalCodeEl.textContent = "";
-  writeStatusEl.textContent = "Fetching song info…";
-  writeStatusEl.className = "write-status";
-  downloadStatusEl.textContent = "";
-  retryWriteBtn.hidden = true;
-
+async function refreshLibrary() {
   let data;
   try {
-    const res = await fetch("/api/songs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
+    const res = await fetch("/api/library");
     data = await res.json();
-    if (data.error) {
-      writeStatusEl.textContent = data.error;
-      writeStatusEl.className = "write-status err";
-      return;
-    }
   } catch (err) {
-    writeStatusEl.textContent = "Couldn't reach the Pi.";
-    writeStatusEl.className = "write-status err";
-    return;
+    return; // transient network hiccup - next poll will retry
   }
 
-  modalTitleEl.textContent = "Write this tag";
-  modalCodeEl.textContent = data.code;
-  armWrite(data.code);
-  pollHandles.push(setInterval(() => pollDownloadStatus(data.code), 2000));
-  pollDownloadStatus(data.code);
+  libraryEl.innerHTML = "";
+  libraryEmptyEl.hidden = data.entries.length > 0;
+  for (const entry of data.entries) {
+    libraryEl.appendChild(renderLibraryEntry(entry));
+  }
+}
+
+function renderLibraryEntry(entry) {
+  const li = document.createElement("li");
+  li.className = "item";
+
+  const label = STATUS_LABELS[entry.status] || entry.status;
+  const sub = entry.status === "failed" && entry.detail ? `${label}: ${entry.detail}` : label;
+
+  li.innerHTML = `
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
+    </div>
+  `;
+  li.querySelector(".item-title").textContent = entry.title || entry.url;
+  const subEl = li.querySelector(".item-sub");
+  subEl.textContent = entry.artist ? `${entry.artist} — ${sub}` : sub;
+  if (entry.status === "failed") subEl.classList.add("err");
+
+  if (entry.status === "ready") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small";
+    btn.textContent = "Write tag";
+    btn.addEventListener("click", () => openWriteModal(entry.code));
+    li.appendChild(btn);
+  } else if (entry.status === "failed") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small secondary";
+    btn.textContent = "Retry";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      await fetch("/api/songs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: entry.url }),
+      });
+      refreshLibrary();
+    });
+    li.appendChild(btn);
+  }
+
+  return li;
+}
+
+function openWriteModal(code) {
+  overlayEl.hidden = false;
+  modalCodeEl.textContent = code;
+  armWrite(code);
 }
 
 async function armWrite(code) {
   writeStatusEl.textContent = "Place a blank tag on the mini-vinyl reader now…";
   writeStatusEl.className = "write-status";
   retryWriteBtn.hidden = true;
+  if (writePollHandle) clearInterval(writePollHandle);
+
   try {
     await fetch("/api/write", {
       method: "POST",
@@ -292,17 +362,17 @@ async function armWrite(code) {
     writeStatusEl.className = "write-status err";
     return;
   }
-  const handle = setInterval(() => pollWriteStatus(code, handle), 1000);
-  pollHandles.push(handle);
+  writePollHandle = setInterval(() => pollWriteStatus(code), 1000);
 }
 
-async function pollWriteStatus(code, handle) {
+async function pollWriteStatus(code) {
   try {
     const res = await fetch(`/api/write/status?code=${encodeURIComponent(code)}`);
     const data = await res.json();
     if (data.status === "waiting") return;
 
-    clearInterval(handle);
+    clearInterval(writePollHandle);
+    writePollHandle = null;
     if (data.status === "success") {
       writeStatusEl.textContent = "Tag written!";
       writeStatusEl.className = "write-status ok";
@@ -324,37 +394,19 @@ async function pollWriteStatus(code, handle) {
   }
 }
 
-async function pollDownloadStatus(code) {
-  try {
-    const res = await fetch(`/api/songs/${encodeURIComponent(code)}/status`);
-    const data = await res.json();
-    const labels = {
-      reserved: "Download starting…",
-      downloading: "Downloading…",
-      ready: "Download complete.",
-      failed: `Download failed${data.detail ? ": " + data.detail : ""}.`,
-    };
-    downloadStatusEl.textContent = labels[data.status] || "";
-  } catch (err) {
-    // transient network hiccup - next poll will retry
-  }
-}
-
 retryWriteBtn.addEventListener("click", () => {
   const code = modalCodeEl.textContent;
   if (code) armWrite(code);
 });
 
-closeModalBtn.addEventListener("click", closeModal);
-
-function openModal() {
-  overlayEl.hidden = false;
-}
-
-function closeModal() {
+closeModalBtn.addEventListener("click", () => {
   overlayEl.hidden = true;
-  stopPolling();
-}
+  if (writePollHandle) clearInterval(writePollHandle);
+  writePollHandle = null;
+});
+
+refreshLibrary();
+setInterval(refreshLibrary, 3000);
 </script>
 </body>
 </html>
