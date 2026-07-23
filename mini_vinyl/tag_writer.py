@@ -18,6 +18,7 @@ class WriteRequest:
     deadline: float
     status: str = "waiting"  # waiting | success | error | timeout | superseded
     detail: str = field(default="")
+    force: bool = False  # skip the "tag already has data" refusal - see main.py
 
 
 class WriteCoordinator:
@@ -25,14 +26,14 @@ class WriteCoordinator:
         self._lock = threading.Lock()
         self._current: WriteRequest | None = None
 
-    def start(self, code: str, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def start(self, code: str, timeout: float = DEFAULT_TIMEOUT, force: bool = False) -> None:
         """Arms a new pending write, superseding any prior one still
         waiting (rather than leaving its browser tab polling a request
         that's silently been replaced)."""
         with self._lock:
             if self._current is not None and self._current.status == "waiting":
                 self._current.status = "superseded"
-            self._current = WriteRequest(code=code, deadline=time.time() + timeout)
+            self._current = WriteRequest(code=code, deadline=time.time() + timeout, force=force)
 
     def take_pending(self) -> WriteRequest | None:
         """Called from the poll loop when a tag is present. Returns the

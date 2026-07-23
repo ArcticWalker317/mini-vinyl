@@ -11,6 +11,7 @@ and finishes on its own even if nobody's watching. /api/library is how
 the frontend finds out what's ready to have a tag written for it.
 """
 
+import logging
 import subprocess
 
 from flask import Flask, request, send_from_directory
@@ -18,8 +19,22 @@ from flask import Flask, request, send_from_directory
 from mini_vinyl.library import Library
 from mini_vinyl.tag_writer import WriteCoordinator
 
+# The frontend polls these every 1-3s while a modal/the library view is
+# open, which would otherwise bury the process's own [main]/[youtube]/
+# [library] prints under a wall of routine "GET ... 200" lines. Everything
+# else (search, add, write, and any non-2xx response) still logs normally.
+_QUIET_POLL_PATHS = ("/api/write/status", "/api/library")
+
+
+class _QuietPollingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(f'"GET {path}' in message for path in _QUIET_POLL_PATHS)
+
 
 def create_app(library: Library, write_coordinator: WriteCoordinator) -> Flask:
+    logging.getLogger("werkzeug").addFilter(_QuietPollingFilter())
+
     app = Flask(__name__)
 
     @app.get("/")
@@ -61,7 +76,7 @@ def create_app(library: Library, write_coordinator: WriteCoordinator) -> Flask:
             return {"error": "code is required"}, 400
         if library.status_for_code(code)["status"] == "unknown":
             return {"error": "unknown code"}, 404
-        write_coordinator.start(code)
+        write_coordinator.start(code, force=bool(data.get("force")))
         return {"status": "waiting"}
 
     @app.get("/api/write/status")

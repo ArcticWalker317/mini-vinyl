@@ -49,13 +49,18 @@ def _handle_pending_write(
 ) -> bool:
     # Refuse to clobber a tag that already has data on it - guards against
     # a stale/forgotten pending write firing against, say, a vinyl resting
-    # on the reader mid-playback rather than a genuinely blank tag.
-    if reader.read_ndef_uri() is not None:
+    # on the reader mid-playback rather than a genuinely blank tag. The web
+    # UI can override this per-request (pending.force) once the user's
+    # explicitly confirmed they want to overwrite what's on it.
+    if not pending.force and reader.read_ndef_uri() is not None:
+        print(f"[main] refusing to write {pending.code!r} - tag already has data on it")
         write_coordinator.resolve(pending.code, False, "tag already has data")
         return False
     if reader.write_ndef_uri(pending.code):
+        print(f"[main] wrote {pending.code!r} successfully")
         write_coordinator.resolve(pending.code, True)
         return True
+    print(f"[main] write of {pending.code!r} failed (I2C write errors after retrying)")
     write_coordinator.resolve(pending.code, False, "write failed")
     return False
 
@@ -94,6 +99,11 @@ def run_player() -> None:
     uri_cache: dict[str, str] = {}
 
     current_uid = None
+    # The last uid found to have no readable NDEF data, if any - without
+    # this, a blank/unwritten tag left sitting on the reader gets a full
+    # multi-page NDEF re-read (and a repeated log line) on every single
+    # poll, ~7x/second, instead of just once until it's lifted.
+    blank_uid = None
     misses = 0
 
     print("Ready. Waiting for tags...")
@@ -109,7 +119,8 @@ def run_player() -> None:
                     if _handle_pending_write(reader, write_coordinator, pending):
                         uri_cache[uid] = pending.code
                         current_uid = uid
-                elif uid != current_uid:
+                        blank_uid = None
+                elif uid != current_uid and uid != blank_uid:
                     uri = uri_cache.get(uid)
                     if uri is None:
                         uri = reader.read_ndef_uri()
@@ -117,15 +128,18 @@ def run_player() -> None:
                             uri_cache[uid] = uri
                     if uri is None:
                         print(f"[main] no NDEF URI found on tag {uid}")
+                        blank_uid = uid
                     else:
                         current_uid = uid
                         manager.handle_tag_present(tag_entry_from_uri(uid, uri))
             else:
                 misses += 1
-                if current_uid is not None and misses >= REMOVAL_THRESHOLD:
-                    print("[main] tag removed")
-                    manager.handle_tag_absent()
-                    current_uid = None
+                if misses >= REMOVAL_THRESHOLD:
+                    if current_uid is not None:
+                        print("[main] tag removed")
+                        manager.handle_tag_absent()
+                        current_uid = None
+                    blank_uid = None
 
             time.sleep(0.05)
     except KeyboardInterrupt:

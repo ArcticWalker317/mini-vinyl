@@ -82,6 +82,10 @@
     color: var(--fg);
     border: 1px solid var(--border);
   }
+  button.danger {
+    background: var(--err);
+    color: #fff;
+  }
   button.small {
     font-size: 0.85rem;
     padding: 0.4rem 0.7rem;
@@ -193,6 +197,7 @@
     <div class="code" id="modal-code"></div>
     <div class="write-status" id="write-status"></div>
     <div class="modal-actions">
+      <button type="button" class="danger" id="overwrite-write" hidden>Overwrite current song</button>
       <button type="button" class="secondary" id="retry-write" hidden>Retry write</button>
       <button type="button" class="secondary" id="close-modal">Close</button>
     </div>
@@ -208,6 +213,7 @@ const overlayEl = document.getElementById("overlay");
 const modalCodeEl = document.getElementById("modal-code");
 const writeStatusEl = document.getElementById("write-status");
 const retryWriteBtn = document.getElementById("retry-write");
+const overwriteWriteBtn = document.getElementById("overwrite-write");
 const closeModalBtn = document.getElementById("close-modal");
 
 const STATUS_LABELS = {
@@ -342,20 +348,23 @@ function renderLibraryEntry(entry) {
 function openWriteModal(code) {
   overlayEl.hidden = false;
   modalCodeEl.textContent = code;
-  armWrite(code);
+  armWrite(code, false);
 }
 
-async function armWrite(code) {
-  writeStatusEl.textContent = "Place a blank tag on the mini-vinyl reader now…";
+async function armWrite(code, force) {
+  writeStatusEl.textContent = force
+    ? "Place the tag to overwrite back on the mini-vinyl reader now…"
+    : "Place a blank tag on the mini-vinyl reader now…";
   writeStatusEl.className = "write-status";
   retryWriteBtn.hidden = true;
+  overwriteWriteBtn.hidden = true;
   if (writePollHandle) clearInterval(writePollHandle);
 
   try {
     await fetch("/api/write", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, force }),
     });
   } catch (err) {
     writeStatusEl.textContent = "Couldn't reach the Pi to arm the write.";
@@ -380,6 +389,10 @@ async function pollWriteStatus(code) {
       writeStatusEl.textContent = "Timed out waiting for a tag.";
       writeStatusEl.className = "write-status err";
       retryWriteBtn.hidden = false;
+    } else if (data.status === "error" && data.detail === "tag already has data") {
+      writeStatusEl.textContent = "That tag already has a song on it.";
+      writeStatusEl.className = "write-status err";
+      overwriteWriteBtn.hidden = false;
     } else if (data.status === "error") {
       writeStatusEl.textContent = data.detail || "Couldn't write the tag.";
       writeStatusEl.className = "write-status err";
@@ -396,7 +409,14 @@ async function pollWriteStatus(code) {
 
 retryWriteBtn.addEventListener("click", () => {
   const code = modalCodeEl.textContent;
-  if (code) armWrite(code);
+  if (code) armWrite(code, false);
+});
+
+overwriteWriteBtn.addEventListener("click", () => {
+  const code = modalCodeEl.textContent;
+  if (code && confirm("This will erase whatever's currently on that tag. Continue?")) {
+    armWrite(code, true);
+  }
 });
 
 closeModalBtn.addEventListener("click", () => {
