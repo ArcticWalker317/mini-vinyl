@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-vinyl</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fafafa;
+    --fg: #1a1a1a;
+    --muted: #666;
+    --card: #fff;
+    --border: #ddd;
+    --accent: #b5482a;
+    --accent-fg: #fff;
+    --ok: #2e7d32;
+    --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16130f;
+      --fg: #f0ece6;
+      --muted: #aaa;
+      --card: #241f1a;
+      --border: #3a332b;
+      --accent: #d97a55;
+      --accent-fg: #1a1005;
+      --ok: #7cd992;
+      --err: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  main {
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 1rem 1rem 3rem;
+  }
+  h1 {
+    font-size: 1.3rem;
+    margin: 0.5rem 0 1rem;
+  }
+  form#search-form {
+    display: flex;
+    gap: 0.5rem;
+  }
+  input[type="text"] {
+    flex: 1;
+    font-size: 1rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--fg);
+  }
+  button {
+    font-size: 1rem;
+    padding: 0.6rem 1rem;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.secondary {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--border);
+  }
+  ul#results {
+    list-style: none;
+    margin: 1rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  li.result {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.6rem 0.8rem;
+  }
+  .result-text { flex: 1; min-width: 0; }
+  .result-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .result-uploader {
+    color: var(--muted);
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #status-msg {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+    min-height: 1.2em;
+  }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+  }
+  .overlay[hidden] { display: none; }
+  .modal {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 1.5rem;
+    max-width: 380px;
+    width: 100%;
+  }
+  .modal h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.1rem;
+  }
+  .code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.15rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    word-break: break-all;
+    margin: 0.5rem 0 1rem;
+  }
+  .write-status {
+    font-size: 0.95rem;
+    margin-bottom: 0.5rem;
+  }
+  .write-status.ok { color: var(--ok); }
+  .write-status.err { color: var(--err); }
+  .download-status {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>mini-vinyl</h1>
+  <form id="search-form">
+    <input type="text" id="query" placeholder="Search for a song..." autocomplete="off">
+    <button type="submit">Search</button>
+  </form>
+  <div id="status-msg"></div>
+  <ul id="results"></ul>
+</main>
+
+<div class="overlay" id="overlay" hidden>
+  <div class="modal">
+    <h2 id="modal-title">Adding song&hellip;</h2>
+    <div class="code" id="modal-code"></div>
+    <div class="write-status" id="write-status">Place a blank tag on the mini-vinyl reader now.</div>
+    <div class="download-status" id="download-status"></div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="retry-write" hidden>Retry write</button>
+      <button type="button" class="secondary" id="close-modal">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const resultsEl = document.getElementById("results");
+const statusMsgEl = document.getElementById("status-msg");
+const overlayEl = document.getElementById("overlay");
+const modalTitleEl = document.getElementById("modal-title");
+const modalCodeEl = document.getElementById("modal-code");
+const writeStatusEl = document.getElementById("write-status");
+const downloadStatusEl = document.getElementById("download-status");
+const retryWriteBtn = document.getElementById("retry-write");
+const closeModalBtn = document.getElementById("close-modal");
+
+let pollHandles = [];
+
+function stopPolling() {
+  pollHandles.forEach(clearInterval);
+  pollHandles = [];
+}
+
+document.getElementById("search-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const query = document.getElementById("query").value.trim();
+  if (!query) return;
+
+  statusMsgEl.textContent = "Searching...";
+  resultsEl.innerHTML = "";
+
+  try {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+    const data = await res.json();
+    if (data.error) {
+      statusMsgEl.textContent = data.error;
+      return;
+    }
+    statusMsgEl.textContent = data.results.length ? "" : "No results.";
+    for (const r of data.results) {
+      resultsEl.appendChild(renderResult(r));
+    }
+  } catch (err) {
+    statusMsgEl.textContent = "Search failed - is the Pi reachable?";
+  }
+});
+
+function renderResult(r) {
+  const li = document.createElement("li");
+  li.className = "result";
+  li.innerHTML = `
+    <div class="result-text">
+      <div class="result-title"></div>
+      <div class="result-uploader"></div>
+    </div>
+    <button type="button">Add</button>
+  `;
+  li.querySelector(".result-title").textContent = r.title;
+  li.querySelector(".result-uploader").textContent = r.uploader;
+  li.querySelector("button").addEventListener("click", () => addSong(r.url));
+  return li;
+}
+
+async function addSong(url) {
+  openModal();
+  modalTitleEl.textContent = "Adding song…";
+  modalCodeEl.textContent = "";
+  writeStatusEl.textContent = "Fetching song info…";
+  writeStatusEl.className = "write-status";
+  downloadStatusEl.textContent = "";
+  retryWriteBtn.hidden = true;
+
+  let data;
+  try {
+    const res = await fetch("/api/songs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    data = await res.json();
+    if (data.error) {
+      writeStatusEl.textContent = data.error;
+      writeStatusEl.className = "write-status err";
+      return;
+    }
+  } catch (err) {
+    writeStatusEl.textContent = "Couldn't reach the Pi.";
+    writeStatusEl.className = "write-status err";
+    return;
+  }
+
+  modalTitleEl.textContent = "Write this tag";
+  modalCodeEl.textContent = data.code;
+  armWrite(data.code);
+  pollHandles.push(setInterval(() => pollDownloadStatus(data.code), 2000));
+  pollDownloadStatus(data.code);
+}
+
+async function armWrite(code) {
+  writeStatusEl.textContent = "Place a blank tag on the mini-vinyl reader now…";
+  writeStatusEl.className = "write-status";
+  retryWriteBtn.hidden = true;
+  try {
+    await fetch("/api/write", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  } catch (err) {
+    writeStatusEl.textContent = "Couldn't reach the Pi to arm the write.";
+    writeStatusEl.className = "write-status err";
+    return;
+  }
+  const handle = setInterval(() => pollWriteStatus(code, handle), 1000);
+  pollHandles.push(handle);
+}
+
+async function pollWriteStatus(code, handle) {
+  try {
+    const res = await fetch(`/api/write/status?code=${encodeURIComponent(code)}`);
+    const data = await res.json();
+    if (data.status === "waiting") return;
+
+    clearInterval(handle);
+    if (data.status === "success") {
+      writeStatusEl.textContent = "Tag written!";
+      writeStatusEl.className = "write-status ok";
+    } else if (data.status === "timeout") {
+      writeStatusEl.textContent = "Timed out waiting for a tag.";
+      writeStatusEl.className = "write-status err";
+      retryWriteBtn.hidden = false;
+    } else if (data.status === "error") {
+      writeStatusEl.textContent = data.detail || "Couldn't write the tag.";
+      writeStatusEl.className = "write-status err";
+      retryWriteBtn.hidden = false;
+    } else {
+      writeStatusEl.textContent = "Write request was superseded.";
+      writeStatusEl.className = "write-status err";
+      retryWriteBtn.hidden = false;
+    }
+  } catch (err) {
+    // transient network hiccup - next poll will retry
+  }
+}
+
+async function pollDownloadStatus(code) {
+  try {
+    const res = await fetch(`/api/songs/${encodeURIComponent(code)}/status`);
+    const data = await res.json();
+    const labels = {
+      reserved: "Download starting…",
+      downloading: "Downloading…",
+      ready: "Download complete.",
+      failed: `Download failed${data.detail ? ": " + data.detail : ""}.`,
+    };
+    downloadStatusEl.textContent = labels[data.status] || "";
+  } catch (err) {
+    // transient network hiccup - next poll will retry
+  }
+}
+
+retryWriteBtn.addEventListener("click", () => {
+  const code = modalCodeEl.textContent;
+  if (code) armWrite(code);
+});
+
+closeModalBtn.addEventListener("click", closeModal);
+
+function openModal() {
+  overlayEl.hidden = false;
+}
+
+function closeModal() {
+  overlayEl.hidden = true;
+  stopPolling();
+}
+</script>
+</body>
+</html>

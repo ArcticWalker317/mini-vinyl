@@ -1,3 +1,4 @@
 adafruit-blinka
 adafruit-circuitpython-pn532
 python-dotenv
+flask

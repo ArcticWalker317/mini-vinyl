@@ -7,18 +7,23 @@ Usage:
 
 import argparse
 import sys
+import threading
 import time
 
+from mini_vinyl import web
 from mini_vinyl.config import TagEntry, load_secrets, env
+from mini_vinyl.library import Library
 from mini_vinyl.nfc_reader import NfcReader
 from mini_vinyl.player_manager import PlayerManager
 from mini_vinyl.players.youtube_player import YoutubePlayer
+from mini_vinyl.tag_writer import WriteCoordinator, WriteRequest
 
 # How many consecutive empty polls before we consider the tag removed.
 # The PN532 occasionally misses a poll even while a tag sits still, so a
 # single miss shouldn't stop playback.
 REMOVAL_THRESHOLD = 3
 POLL_TIMEOUT = 0.3
+WEB_PORT = 8080
 
 
 def run_scan() -> None:
@@ -39,6 +44,33 @@ def tag_entry_from_uri(uid: str, uri: str) -> TagEntry:
     return TagEntry(uid=uid, type="youtube", id=uri)
 
 
+def _handle_pending_write(
+    reader: NfcReader, write_coordinator: WriteCoordinator, pending: WriteRequest
+) -> bool:
+    # Refuse to clobber a tag that already has data on it - guards against
+    # a stale/forgotten pending write firing against, say, a vinyl resting
+    # on the reader mid-playback rather than a genuinely blank tag.
+    if reader.read_ndef_uri() is not None:
+        write_coordinator.resolve(pending.code, False, "tag already has data")
+        return False
+    if reader.write_ndef_uri(pending.code):
+        write_coordinator.resolve(pending.code, True)
+        return True
+    write_coordinator.resolve(pending.code, False, "write failed")
+    return False
+
+
+def _start_web_ui(library: Library, write_coordinator: WriteCoordinator) -> None:
+    app = web.create_app(library, write_coordinator)
+    thread = threading.Thread(
+        target=app.run,
+        kwargs={"host": "0.0.0.0", "port": WEB_PORT, "threaded": True, "use_reloader": False},
+        daemon=True,
+    )
+    thread.start()
+    print(f"[main] web UI listening on port {WEB_PORT}")
+
+
 def run_player() -> None:
     load_secrets()
 
@@ -47,9 +79,13 @@ def run_player() -> None:
         reset_pin=_int_or_none(env("PN532_RESET_PIN")),
     )
 
-    players = {"youtube": YoutubePlayer(audio_output=env("AUDIO_OUTPUT", "pipewire"))}
+    library = Library()
+    write_coordinator = WriteCoordinator()
+    players = {"youtube": YoutubePlayer(library, audio_output=env("AUDIO_OUTPUT", "pipewire"))}
 
     manager = PlayerManager(players)
+
+    _start_web_ui(library, write_coordinator)
 
     # UID -> URI, populated as tags are read. Re-reading all 12 NDEF pages
     # over I2C on every single tap is real overhead on this hardware; a
@@ -67,7 +103,13 @@ def run_player() -> None:
 
             if uid:
                 misses = 0
-                if uid != current_uid:
+                pending = write_coordinator.take_pending()
+                if pending is not None:
+                    print(f"[main] writing tag with code {pending.code!r}")
+                    if _handle_pending_write(reader, write_coordinator, pending):
+                        uri_cache[uid] = pending.code
+                        current_uid = uid
+                elif uid != current_uid:
                     uri = uri_cache.get(uid)
                     if uri is None:
                         uri = reader.read_ndef_uri()

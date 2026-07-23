@@ -1,6 +1,10 @@
-"""Minimal NDEF parsing: just enough to pull a URI out of a single
-well-known URI record, which is what phone NFC-writer apps (e.g. "NFC
-Tools") produce when you write a URL to a tag.
+"""Minimal NDEF parsing/encoding: just enough to read a URI out of a
+single well-known URI record (what phone NFC-writer apps like "NFC
+Tools" produce when you write a URL to a tag), and to write one back -
+used to burn a library "code" (see mini_vinyl/library.py) onto a tag
+with URI Identifier Code 0x00 (no prefix abbreviation), so the payload
+is just the plain code text and parse_ndef_message() reads it back
+unchanged.
 """
 
 # NFC Forum URI Record Type Definition, section 3.2.2.
@@ -92,3 +96,26 @@ def parse_ndef_message(message: bytes) -> str | None:
 
     prefix = URI_PREFIXES.get(payload[0], "")
     return prefix + payload[1:].decode("utf-8", errors="replace")
+
+
+def encode_ndef_uri_tlv(text: str, prefix_code: int = 0x00) -> bytes:
+    """Builds a complete NDEF TLV (start TLV + a single well-known URI
+    record + terminator TLV) ready to write to an NTAG21x's user memory
+    starting at page 4, padded to a multiple of 4 bytes (the page size).
+
+    Inverse of parse_ndef_message(): with the default prefix_code 0x00
+    (no abbreviation), parse_ndef_message() on the written bytes returns
+    `text` back unchanged.
+    """
+    payload = bytes([prefix_code]) + text.encode("utf-8")
+    if len(payload) > 255:
+        raise ValueError(f"text too long to fit a short NDEF record: {len(text)} bytes")
+
+    record = bytes([0xD1, 0x01, len(payload)]) + b"U" + payload  # TNF=1, SR=1, MB=ME=1
+    if len(record) > 255:
+        raise ValueError(f"text too long to fit a single-byte NDEF TLV length: {len(text)} bytes")
+    tlv = bytes([0x03, len(record)]) + record + bytes([0xFE])  # NDEF TLV + terminator TLV
+
+    if len(tlv) % 4:
+        tlv += bytes(4 - len(tlv) % 4)
+    return tlv
