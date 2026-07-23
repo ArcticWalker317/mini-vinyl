@@ -28,16 +28,46 @@ from mini_vinyl.playlists import PlaylistStore
 from mini_vinyl.tag_writer import WriteCoordinator
 
 # The frontend polls these every 1-3s while a modal/the library view is
-# open, which would otherwise bury the process's own [main]/[youtube]/
-# [library] prints under a wall of routine "GET ... 200" lines. Everything
-# else (search, add, write, and any non-2xx response) still logs normally.
-_QUIET_POLL_PATHS = ("/api/write/status", "/api/library")
+# open, and browsers probe the others automatically (favicon/iOS
+# home-screen icons) on basically every page load - both would otherwise
+# bury the process's own [main]/[youtube]/[library] prints under a wall
+# of routine "GET ... " lines. Everything else (search, add, write, and
+# any non-2xx response outside this list) still logs normally.
+_QUIET_PATHS = (
+    "/api/write/status",
+    "/api/library",
+    "/favicon.ico",
+    "/apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png",
+    "/apple-touch-icon-120x120.png",
+    "/apple-touch-icon-120x120-precomposed.png",
+)
+_HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH")
 
 
 class _QuietPollingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return not any(f'"GET {path}' in message for path in _QUIET_POLL_PATHS)
+        if "Bad request version" in message:
+            # A browser tried HTTPS first against this plain-HTTP-only dev
+            # server (common speculative behavior on unfamiliar hosts) and
+            # its TLS handshake got logged as a malformed HTTP request -
+            # noise, not a real error; it falls back to plain HTTP right
+            # after and the page loads fine.
+            return False
+        start = message.find('"')
+        if start != -1:
+            # The access-log line for that same rejected handshake dumps
+            # the raw (non-HTTP) bytes in place of a request line - keep
+            # only lines whose quoted portion actually starts with a real
+            # HTTP method. (The quote sits after the "<ip> - - [<time>] "
+            # prefix Werkzeug puts in front of every access line, not at
+            # the very start of the message.)
+            end = message.find('"', start + 1)
+            request_line = message[start + 1 : end] if end != -1 else ""
+            if not request_line.startswith(_HTTP_METHODS):
+                return False
+        return not any(f'"GET {path}' in message for path in _QUIET_PATHS)
 
 
 def create_app(library: Library, playlist_store: PlaylistStore, write_coordinator: WriteCoordinator) -> Flask:
