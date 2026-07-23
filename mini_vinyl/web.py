@@ -50,6 +50,8 @@ def create_app(library: Library, write_coordinator: WriteCoordinator) -> Flask:
             results = library.search(query)
         except subprocess.TimeoutExpired:
             return {"error": "search timed out"}, 504
+        for r in results:
+            r["code"] = library.code_for_url(r["url"])
         return {"results": results}
 
     @app.post("/api/songs")

@@ -184,6 +184,13 @@ class Library:
     def path_for(self, entry: dict) -> Path:
         return self._cache_dir / entry["file"]
 
+    def code_for_url(self, url: str) -> str | None:
+        """The code for `url` if it's already been fully downloaded, else
+        None - used to flag already-downloaded search results before the
+        user re-adds something they've already got."""
+        entry = self.get_by_url(url)
+        return _code_of(entry) if entry else None
+
     # ---- web "Add" flow ----
 
     def search(self, query: str, limit: int = 15) -> list[dict]:

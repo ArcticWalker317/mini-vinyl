@@ -46,6 +46,37 @@
     font-size: 1.3rem;
     margin: 0.5rem 0 1rem;
   }
+  .screen[hidden] { display: none; }
+  .home-screen {
+    min-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2.5rem;
+    text-align: center;
+  }
+  .home-title {
+    font-size: 2.2rem;
+    margin: 0;
+  }
+  .home-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+    max-width: 280px;
+  }
+  button.wide {
+    width: 100%;
+    padding: 0.85rem 1rem;
+  }
+  button.back {
+    background: transparent;
+    color: var(--muted);
+    padding: 0.3rem 0;
+    margin-bottom: 0.5rem;
+  }
   h2.section {
     font-size: 1rem;
     color: var(--muted);
@@ -178,17 +209,36 @@
 </head>
 <body>
 <main>
-  <h1>mini-vinyl</h1>
-  <form id="search-form">
-    <input type="text" id="query" placeholder="Search for a song..." autocomplete="off">
-    <button type="submit">Search</button>
-  </form>
-  <div id="status-msg"></div>
-  <ul class="list" id="results"></ul>
+  <section class="screen home-screen" id="screen-home">
+    <h1 class="home-title">mini-vinyl</h1>
+    <div class="home-buttons">
+      <button type="button" class="wide" id="nav-add">Add Songs</button>
+      <button type="button" class="wide" id="nav-library">View Library</button>
+      <button type="button" class="wide secondary" id="nav-playlist">Create Playlist</button>
+    </div>
+  </section>
 
-  <h2 class="section">Your library</h2>
-  <div id="library-empty">Nothing added yet.</div>
-  <ul class="list" id="library"></ul>
+  <section class="screen" id="screen-add" hidden>
+    <button type="button" class="back" id="back-from-add">&larr; Back</button>
+    <h1>Add Songs</h1>
+    <form id="search-form">
+      <input type="text" id="query" placeholder="Search for a song..." autocomplete="off">
+      <button type="submit">Search</button>
+    </form>
+    <div id="status-msg"></div>
+    <div id="already-downloaded-section" hidden>
+      <h2 class="section">Already downloaded songs</h2>
+      <ul class="list" id="already-downloaded"></ul>
+    </div>
+    <ul class="list" id="results"></ul>
+  </section>
+
+  <section class="screen" id="screen-library" hidden>
+    <button type="button" class="back" id="back-from-library">&larr; Back</button>
+    <h1>Your Library</h1>
+    <div id="library-empty">Nothing added yet.</div>
+    <ul class="list" id="library"></ul>
+  </section>
 </main>
 
 <div class="overlay" id="overlay" hidden>
@@ -207,6 +257,8 @@
 <script>
 const resultsEl = document.getElementById("results");
 const statusMsgEl = document.getElementById("status-msg");
+const alreadyDownloadedSectionEl = document.getElementById("already-downloaded-section");
+const alreadyDownloadedEl = document.getElementById("already-downloaded");
 const libraryEl = document.getElementById("library");
 const libraryEmptyEl = document.getElementById("library-empty");
 const overlayEl = document.getElementById("overlay");
@@ -227,6 +279,21 @@ const STATUS_LABELS = {
 
 let writePollHandle = null;
 
+function showScreen(id) {
+  for (const screen of document.querySelectorAll(".screen")) {
+    screen.hidden = screen.id !== id;
+  }
+}
+
+document.getElementById("nav-add").addEventListener("click", () => showScreen("screen-add"));
+document.getElementById("nav-library").addEventListener("click", () => {
+  showScreen("screen-library");
+  refreshLibrary();
+});
+// "Create Playlist" is a placeholder - intentionally does nothing yet.
+document.getElementById("back-from-add").addEventListener("click", () => showScreen("screen-home"));
+document.getElementById("back-from-library").addEventListener("click", () => showScreen("screen-home"));
+
 document.getElementById("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const query = document.getElementById("query").value.trim();
@@ -234,6 +301,8 @@ document.getElementById("search-form").addEventListener("submit", async (e) => {
 
   statusMsgEl.textContent = "Searching...";
   resultsEl.innerHTML = "";
+  alreadyDownloadedEl.innerHTML = "";
+  alreadyDownloadedSectionEl.hidden = true;
 
   try {
     const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
@@ -243,13 +312,38 @@ document.getElementById("search-form").addEventListener("submit", async (e) => {
       return;
     }
     statusMsgEl.textContent = data.results.length ? "" : "No results.";
-    for (const r of data.results) {
+
+    const alreadyDownloaded = data.results.filter((r) => r.code);
+    const toAdd = data.results.filter((r) => !r.code);
+
+    for (const r of alreadyDownloaded) {
+      alreadyDownloadedEl.appendChild(renderAlreadyDownloaded(r));
+    }
+    alreadyDownloadedSectionEl.hidden = alreadyDownloaded.length === 0;
+
+    for (const r of toAdd) {
       resultsEl.appendChild(renderResult(r));
     }
   } catch (err) {
     statusMsgEl.textContent = "Search failed - is the Pi reachable?";
   }
 });
+
+function renderAlreadyDownloaded(r) {
+  const li = document.createElement("li");
+  li.className = "item";
+  li.innerHTML = `
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
+    </div>
+    <button type="button" class="small">Write tag</button>
+  `;
+  li.querySelector(".item-title").textContent = r.title;
+  li.querySelector(".item-sub").textContent = r.uploader;
+  li.querySelector("button").addEventListener("click", () => openWriteModal(r.code));
+  return li;
+}
 
 function renderResult(r) {
   const li = document.createElement("li");
