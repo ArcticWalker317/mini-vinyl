@@ -105,9 +105,15 @@ class Library:
         if not self._entries_path.exists():
             return {}
         try:
-            return json.loads(self._entries_path.read_text(encoding="utf-8"))
+            entries = json.loads(self._entries_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
+        # library.json predates the add-queue's "status" field - every
+        # entry it ever wrote was already a finished download, so
+        # anything missing one gets treated as "ready" from here on.
+        for entry in entries.values():
+            entry.setdefault("status", "ready")
+        return entries
 
     def _save_locked(self) -> None:
         self._entries_path.write_text(
