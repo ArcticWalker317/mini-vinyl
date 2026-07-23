@@ -13,9 +13,8 @@ CONFIG_DIR = ROOT / "config"
 @dataclass(frozen=True)
 class TagEntry:
     uid: str
-    type: str  # "youtube" | "spotify"
+    type: str  # "youtube"
     id: str
-    title: str = ""
 
 
 def load_secrets(path: Path | None = None) -> None:

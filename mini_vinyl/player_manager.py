@@ -7,7 +7,7 @@ class PlayerManager:
     source is ever playing at a time."""
 
     def __init__(self, players: dict[str, Player]):
-        self._players = players  # e.g. {"youtube": ..., "spotify": ...}
+        self._players = players  # e.g. {"youtube": ...}
         self._active: Player | None = None
 
     def handle_tag_present(self, tag: TagEntry) -> None:

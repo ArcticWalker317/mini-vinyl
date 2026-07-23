@@ -4,7 +4,7 @@ from mini_vinyl.config import TagEntry
 
 
 class Player(ABC):
-    """One Player subclass per source type ("youtube", "spotify", ...)."""
+    """One Player subclass per source type (currently just "youtube")."""
 
     @abstractmethod
     def play(self, tag: TagEntry) -> None:

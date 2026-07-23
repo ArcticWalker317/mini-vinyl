@@ -2,4 +2,3 @@ venv/
 __pycache__/
 *.pyc
 config/secrets.env
-.spotify_token_cache

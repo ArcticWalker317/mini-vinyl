@@ -30,17 +30,21 @@ class NfcReader:
         i2c = busio.I2C(board.SCL, board.SDA)
         reset = DigitalInOut(getattr(board, f"D{reset_pin}")) if reset_pin else None
 
-        # Right after a previous process exits, the PN532 sometimes isn't
-        # ready to handshake yet and init raises RuntimeError("Did not
-        # receive expected ACK"). Retrying after a short pause reliably
-        # recovers from this.
-        last_exc: RuntimeError | None = None
+        # Right after a previous process exits, or right at boot before the
+        # PN532 has finished powering up, it sometimes isn't ready yet.
+        # That shows up two different ways: init raises
+        # RuntimeError("Did not receive expected ACK") if the PN532 ACKs
+        # the bus but doesn't handshake, or ValueError("No I2C device at
+        # address...") from the underlying I2CDevice probe if it doesn't
+        # even ACK the bus yet. Retrying after a short pause reliably
+        # recovers from both.
+        last_exc: RuntimeError | ValueError | None = None
         self._pn532 = None
         for attempt in range(init_retries):
             try:
                 self._pn532 = PN532_I2C(i2c, debug=False, reset=reset)
                 break
-            except RuntimeError as exc:
+            except (RuntimeError, ValueError) as exc:
                 last_exc = exc
                 time.sleep(init_retry_delay)
         if self._pn532 is None:
@@ -54,7 +58,14 @@ class NfcReader:
     def poll(self, timeout: float = 0.3) -> str | None:
         """Returns the UID (hex, colon-separated) of a tag currently in
         range, or None if nothing is detected within `timeout` seconds."""
-        uid = self._pn532.read_passive_target(timeout=timeout)
+        try:
+            uid = self._pn532.read_passive_target(timeout=timeout)
+        except RuntimeError:
+            # Occasional I2C ACK hiccup, even mid-playback with a tag
+            # sitting still. Treat it like a missed poll rather than
+            # crashing the whole player - the caller already tolerates
+            # a few consecutive misses before deciding a tag is gone.
+            return None
         if uid is None:
             return None
         return uid_to_str(uid)

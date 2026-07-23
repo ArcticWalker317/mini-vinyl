@@ -14,6 +14,16 @@ that point doesn't stop it. Later plays of that tag use `pw-play`
 start on this hardware regardless of what it's playing, while pw-play
 plays raw PCM/WAV with essentially no startup cost.
 
+Downloaded files are named `<song_title>-<artist>.wav` (e.g.
+`the_scientist-coldplay.wav`), and every completed download is recorded
+in `library.json` in the cache directory, keyed by the source URL, with
+its title/artist/filename - that catalog is also how a tag's cached file
+is found on later plays, since the filename can't be derived from the URL
+alone. Title/artist come from yt-dlp's own metadata (falling back through
+artist -> creator -> uploader -> channel, since regular YouTube videos
+usually only have an uploader/channel, while YouTube Music tracks have a
+proper artist tag).
+
 Lifting a tag mid-song and placing the *same* tag back on resumes from
 where it got to (only once it's playing from the cached, near-instant
 path - during the live phase a fresh mpv process always pays the full
@@ -30,13 +40,17 @@ is no mid-playlist resume, unlike single videos. The first time a
 playlist tag is seen, mpv streams it live with `--shuffle` (mpv resolves
 and shuffles the playlist itself), and if it's still playing
 CACHE_AFTER_SECONDS later a background yt-dlp job downloads every track
-in the playlist to its own directory. Once that finishes, later
-placements shuffle the list of local files in Python and play them back
-to back through `pw-play`, one track at a time.
+in the playlist to its own directory, using the same
+`<song_title>-<artist>.wav` naming and adding every track to the same
+library.json. Once that finishes, later placements shuffle the list of
+local files in Python and play them back to back through `pw-play`, one
+track at a time.
 """
 
 import hashlib
+import json
 import random
+import re
 import subprocess
 import threading
 import time
@@ -50,9 +64,19 @@ from mini_vinyl.players.base import Player
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "mini-vinyl" / "youtube"
 CACHE_AFTER_SECONDS = 3.0
 
+# yt-dlp field-fallback template: prefer a proper artist tag (YouTube
+# Music tracks have one), falling back to whoever uploaded the video.
+_ARTIST_FIELD = "%(artist,creator,uploader,channel)s"
+_METADATA_SEP = "\x1f"
+
 
 def _is_playlist_url(url: str) -> bool:
     return "list" in parse_qs(urlparse(url).query)
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower()).strip("_")
+    return slug or "unknown"
 
 
 class YoutubePlayer(Player):
@@ -61,6 +85,10 @@ class YoutubePlayer(Player):
         self._proc: subprocess.Popen | None = None
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self._catalog_path = self._cache_dir / "library.json"
+        self._catalog_lock = threading.Lock()
+        self._catalog: dict[str, dict] = self._load_catalog()
 
         # The single most recently paused tag, if any. Starting a
         # *different* tag invalidates this outright (see play()).
@@ -82,13 +110,39 @@ class YoutubePlayer(Player):
         self._playlist_stop_event: threading.Event | None = None
         self._caching_playlists: set[str] = set()  # playlist urls with a full download in flight
 
-    def _cache_path(self, url: str) -> Path:
-        key = hashlib.sha256(url.encode()).hexdigest()[:16]
-        return self._cache_dir / f"{key}.wav"
+    def _load_catalog(self) -> dict:
+        if not self._catalog_path.exists():
+            return {}
+        try:
+            return json.loads(self._catalog_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _catalog_put(self, url: str, title: str, artist: str, path: Path) -> None:
+        with self._catalog_lock:
+            self._catalog[url] = {
+                "title": title,
+                "artist": artist,
+                "url": url,
+                "file": str(path.relative_to(self._cache_dir)),
+            }
+            self._catalog_path.write_text(
+                json.dumps(self._catalog, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+
+    def _lookup_cached_file(self, url: str) -> Path | None:
+        entry = self._catalog.get(url)
+        if entry is None:
+            return None
+        path = self._cache_dir / entry["file"]
+        return path if path.exists() else None
 
     def _resume_path(self, url: str) -> Path:
+        # Ephemeral trimmed-clip scratch file, unrelated to the
+        # library's <title>-<artist>.wav naming - one per url, overwritten
+        # on every resume.
         key = hashlib.sha256(url.encode()).hexdigest()[:16]
-        return self._cache_dir / f"{key}.resume.wav"
+        return self._cache_dir / f".resume_{key}.wav"
 
     def _playlist_dir(self, url: str) -> Path:
         key = hashlib.sha256(url.encode()).hexdigest()[:16]
@@ -111,13 +165,13 @@ class YoutubePlayer(Player):
             self._play_playlist(tag)
             return
 
-        cache_path = self._cache_path(tag.id)
+        cache_path = self._lookup_cached_file(tag.id)
 
         resume_at = self._paused_position if tag.id == self._paused_url else 0.0
         self._paused_url = None
         self._paused_position = 0.0
 
-        if cache_path.exists():
+        if cache_path is not None:
             play_path = cache_path
             if resume_at > 0:
                 trimmed = self._build_resume_clip(cache_path, tag.id, resume_at)
@@ -125,7 +179,8 @@ class YoutubePlayer(Player):
                     play_path = trimmed
                 else:
                     resume_at = 0.0  # trim failed or resume point past the end
-            print(f"[youtube] playing {tag.id} from cache at {resume_at:.0f}s ({tag.title})")
+            title = self._catalog.get(tag.id, {}).get("title", tag.id)
+            print(f"[youtube] playing {title!r} from cache at {resume_at:.0f}s")
             self._proc = subprocess.Popen(
                 ["pw-play", str(play_path)],
                 stdout=subprocess.DEVNULL,
@@ -134,7 +189,7 @@ class YoutubePlayer(Player):
             self._current_is_cached = True
             self._current_base_position = resume_at
         else:
-            print(f"[youtube] playing {tag.id} ({tag.title})")
+            print(f"[youtube] playing {tag.id}")
             self._proc = subprocess.Popen(
                 [
                     "mpv",
@@ -151,7 +206,7 @@ class YoutubePlayer(Player):
             self._current_base_position = 0.0
             if tag.id not in self._caching_urls:
                 self._cache_timer = threading.Timer(
-                    CACHE_AFTER_SECONDS, self._maybe_start_caching, args=(tag.id, cache_path)
+                    CACHE_AFTER_SECONDS, self._maybe_start_caching, args=(tag.id,)
                 )
                 self._cache_timer.daemon = True
                 self._cache_timer.start()
@@ -159,13 +214,13 @@ class YoutubePlayer(Player):
         self._current_url = tag.id
         self._played_since = time.time()
 
-    def _maybe_start_caching(self, url: str, cache_path: Path) -> None:
+    def _maybe_start_caching(self, url: str) -> None:
         # Fires CACHE_AFTER_SECONDS after play() started; only actually
         # cache if this tag is still the one playing (wasn't lifted early -
         # stop() cancels this timer, but guard here too against any race).
         if self._current_url == url and url not in self._caching_urls:
             self._caching_urls.add(url)
-            self._cache_in_background(url, cache_path)
+            threading.Thread(target=self._download_and_catalog, args=(url,), daemon=True).start()
 
     def _build_resume_clip(self, cache_path: Path, url: str, start_seconds: float) -> Path | None:
         try:
@@ -188,28 +243,65 @@ class YoutubePlayer(Player):
             print(f"[youtube] couldn't build resume clip, starting over: {exc}")
             return None
 
-    def _cache_in_background(self, url: str, cache_path: Path) -> None:
-        output_template = str(cache_path.with_suffix("")) + ".%(ext)s"
-        subprocess.Popen(
-            [
-                "yt-dlp",
-                "-f",
-                "bestaudio",
-                "-x",
-                "--audio-format",
-                "wav",
-                # Strip metadata (title/artist tags) so ffmpeg writes a plain
-                # fmt+data WAV - extra chunks confuse Python's `wave` module
-                # (used for resume-clip trimming) into misreading frame counts.
-                "--postprocessor-args",
-                "ffmpeg:-map_metadata -1",
-                "-o",
-                output_template,
-                url,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    def _download_and_catalog(self, url: str) -> None:
+        try:
+            tmp_template = str(self._cache_dir / "%(id)s.%(ext)s")
+            proc = subprocess.run(
+                [
+                    "yt-dlp",
+                    "--quiet",
+                    "-f",
+                    "bestaudio",
+                    "-x",
+                    "--audio-format",
+                    "wav",
+                    # Strip metadata (title/artist tags) so ffmpeg writes a plain
+                    # fmt+data WAV - extra chunks confuse Python's `wave` module
+                    # (used for resume-clip trimming) into misreading frame counts.
+                    "--postprocessor-args",
+                    "ffmpeg:-map_metadata -1",
+                    "--print",
+                    f"after_move:%(title)s{_METADATA_SEP}{_ARTIST_FIELD}{_METADATA_SEP}%(filepath)s",
+                    "-o",
+                    tmp_template,
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            lines = proc.stdout.strip().splitlines()
+            if proc.returncode != 0 or not lines:
+                print(f"[youtube] cache download failed for {url}: {proc.stderr.strip()[-500:]}")
+                return
+
+            title, artist, filepath = lines[-1].split(_METADATA_SEP)
+            final_path = self._finalize_download(Path(filepath), title, artist)
+            if final_path is not None:
+                self._catalog_put(url, title, artist, final_path)
+        finally:
+            self._caching_urls.discard(url)
+
+    def _finalize_download(
+        self, tmp_path: Path, title: str, artist: str, dest_dir: Path | None = None
+    ) -> Path | None:
+        if not tmp_path.exists():
+            return None
+        dest_dir = dest_dir or self._cache_dir
+        final_path = self._unique_path(dest_dir, f"{_slugify(title)}-{_slugify(artist)}.wav")
+        tmp_path.rename(final_path)
+        return final_path
+
+    def _unique_path(self, dest_dir: Path, filename: str) -> Path:
+        path = dest_dir / filename
+        if not path.exists():
+            return path
+        stem, suffix = path.stem, path.suffix
+        n = 2
+        while True:
+            candidate = dest_dir / f"{stem}_{n}{suffix}"
+            if not candidate.exists():
+                return candidate
+            n += 1
 
     def stop(self) -> None:
         if self._cache_timer is not None:
@@ -331,10 +423,11 @@ class YoutubePlayer(Player):
 
     def _cache_playlist_in_background(self, url: str, playlist_dir: Path) -> None:
         playlist_dir.mkdir(parents=True, exist_ok=True)
-        output_template = str(playlist_dir / "%(playlist_index)s_%(id)s.%(ext)s")
+        output_template = str(playlist_dir / "%(id)s.%(ext)s")
         proc = subprocess.Popen(
             [
                 "yt-dlp",
+                "--quiet",
                 "--yes-playlist",
                 "-f",
                 "bestaudio",
@@ -343,12 +436,16 @@ class YoutubePlayer(Player):
                 "wav",
                 "--postprocessor-args",
                 "ffmpeg:-map_metadata -1",
+                "--print",
+                f"after_move:%(title)s{_METADATA_SEP}{_ARTIST_FIELD}{_METADATA_SEP}"
+                f"%(webpage_url)s{_METADATA_SEP}%(filepath)s",
                 "-o",
                 output_template,
                 url,
             ],
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            text=True,
         )
         threading.Thread(
             target=self._finish_playlist_caching, args=(proc, playlist_dir, url), daemon=True
@@ -357,8 +454,18 @@ class YoutubePlayer(Player):
     def _finish_playlist_caching(
         self, proc: subprocess.Popen, playlist_dir: Path, url: str
     ) -> None:
-        proc.wait()
+        stdout, _ = proc.communicate()
         if proc.returncode == 0:
+            for line in stdout.strip().splitlines():
+                parts = line.split(_METADATA_SEP)
+                if len(parts) != 4:
+                    continue
+                title, artist, track_url, filepath = parts
+                final_path = self._finalize_download(
+                    Path(filepath), title, artist, dest_dir=playlist_dir
+                )
+                if final_path is not None:
+                    self._catalog_put(track_url, title, artist, final_path)
             (playlist_dir / ".complete").touch()
         else:
             print(f"[youtube] playlist download failed for {url} (exit {proc.returncode})")

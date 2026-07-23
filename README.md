@@ -2,11 +2,10 @@
 
 A tiny NFC-triggered record player. Each vinyl has an NTAG213/215/216 tag
 glued in, written (via a phone NFC-writer app, e.g. "NFC Tools") with a
-single URI record - either a YouTube URL or a `spotify:track:...` /
-`spotify:album:...` / `spotify:playlist:...` URI. Tapping it to the PN532
-reader plays that URI's audio out to a paired Bluetooth speaker. Lifting
-the vinyl stops playback. There's no on-Pi tag-to-song mapping file - the
-Pi just reads whatever URI is written on the tag.
+single URI record holding a YouTube URL. Tapping it to the PN532 reader
+plays that video's audio out to a paired Bluetooth speaker. Lifting the
+vinyl stops playback. There's no on-Pi tag-to-song mapping file - the Pi
+just reads whatever URL is written on the tag.
 
 A tag can also hold a YouTube **playlist** URL (any URL with a `list=`
 parameter, e.g. copied from "Share -> Copy link" while viewing a
@@ -14,6 +13,11 @@ playlist). The first tap streams it live in shuffled order while
 downloading every track in the background; once that download finishes,
 every later tap re-shuffles and plays the whole playlist from the
 downloaded files, starting from track one each time.
+
+Every song downloaded to the Pi is saved as `<song_title>-<artist>.wav`
+(e.g. `the_scientist-coldplay.wav`) and recorded in a `library.json`
+catalog alongside the audio files, with each entry's title, artist, and
+source YouTube link.
 
 ## Hardware
 
@@ -90,26 +94,13 @@ ID from `wpctl status`):
 wpctl set-default <sink-id>
 ```
 
-### librespot (Spotify Connect)
-
-Only needed if you want Spotify tags to work. Requires a **Spotify
-Premium** account. Install a prebuilt `librespot` binary (see
-https://github.com/librespot-org/librespot for Pi/armhf builds - check
-whether the build has the `pipewire` backend compiled in; if not, use
-`--backend alsa --device default` in `systemd/librespot.service` instead,
-which PipeWire intercepts automatically via `pipewire-alsa`).
-
-Create a Spotify app at https://developer.spotify.com/dashboard, add
-`http://127.0.0.1:8080/callback` as a redirect URI, and copy the client
-ID/secret into `config/secrets.env`.
-
 ### Config
 
 ```bash
 cp config/secrets.example.env config/secrets.env
 ```
 
-Fill in `config/secrets.env` (Bluetooth MAC, Spotify credentials).
+Fill in `config/secrets.env` (Bluetooth MAC, etc).
 
 ### Writing tags
 
@@ -120,8 +111,6 @@ single **URL/URI record** to each NTAG213/215/216 tag:
 - YouTube playlist: the full playlist URL, e.g.
   `https://www.youtube.com/playlist?list=...` (any URL with a `list=`
   parameter works, including a `watch?v=...&list=...` link)
-- Spotify: a Spotify URI, e.g. `spotify:album:4LH4d3cOWNNsVw41Gqt2kv`
-  (get this from the Spotify app: Share -> Copy Spotify URI)
 
 Verify a tag was written correctly:
 
@@ -138,24 +127,20 @@ If `URI: None`, the tag has no NDEF record (or isn't an NTAG21x tag).
 python -m mini_vinyl.main
 ```
 
-First Spotify playback will open a browser auth URL in the terminal -
-complete that once; the token is cached in `.spotify_token_cache` after.
-
 ### Run on boot
 
-All three services run as **user** systemd units, not system ones -
-`mini-vinyl.service` and `librespot.service` need to reach your PipeWire
-audio session, and `bt-autoconnect.service` needs to run *after*
-PipeWire/WirePlumber have registered the A2DP audio profile with BlueZ
-(a system-level unit races ahead of that and fails to connect).
+Both services run as **user** systemd units, not system ones -
+`mini-vinyl.service` needs to reach your PipeWire audio session, and
+`bt-autoconnect.service` needs to run *after* PipeWire/WirePlumber have
+registered the A2DP audio profile with BlueZ (a system-level unit races
+ahead of that and fails to connect).
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp systemd/mini-vinyl.service systemd/librespot.service systemd/bt-autoconnect.service \
+cp systemd/mini-vinyl.service systemd/bt-autoconnect.service \
   ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now bt-autoconnect.service
-systemctl --user enable --now librespot.service   # if using Spotify
 systemctl --user enable --now mini-vinyl.service
 
 # let user services start at boot even before you log in
@@ -171,22 +156,20 @@ or speaker address differ from the placeholders.
 - `mini_vinyl/nfc_reader.py` polls the PN532 for a tag UID, then reads the
   NDEF URI record directly off the tag (`mini_vinyl/ndef.py` does the
   parsing).
-- `mini_vinyl/main.py` picks a player based on the URI's scheme
-  (`spotify:...` -> Spotify, everything else -> YouTube) and tells the
-  `PlayerManager` to start playback; when the tag is lifted (a few
-  consecutive empty polls, to ignore momentary read misses) it stops
-  playback.
+- `mini_vinyl/main.py` wraps every tag's URI into a `youtube`-type
+  `TagEntry` and tells the `PlayerManager` to start playback; when the tag
+  is lifted (a few consecutive empty polls, to ignore momentary read
+  misses) it stops playback.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
   `yt-dlp` under the hood) and plays audio out through PipeWire, which
   owns the Bluetooth speaker's A2DP sink. Resolving a YouTube URL live is
   slow on Zero W hardware, so the first play of a tag also downloads the
-  full audio to `~/.cache/mini-vinyl/youtube/` in the background; later
-  plays of that tag find the cached file and start instantly, with no
-  live resolution involved. A playlist URL (`list=...`) follows the same
-  live-then-cache pattern, but caches every track in the playlist to
-  `~/.cache/mini-vinyl/youtube/playlists/`; every tap - cached or not -
-  plays the tracks back in a freshly shuffled order.
-- `mini_vinyl/players/spotify_player.py` uses the Spotify Web API
-  (`spotipy`) to tell the `librespot` Spotify Connect instance running on
-  the Pi what to play; `librespot` itself does the audio decode/output,
-  also through PipeWire.
+  full audio to `~/.cache/mini-vinyl/youtube/` in the background, saved as
+  `<song_title>-<artist>.wav`; later plays of that tag find the cached
+  file (via `library.json`, the catalog of every downloaded song's title,
+  artist, and source URL) and start instantly, with no live resolution
+  involved. A playlist URL (`list=...`) follows the same live-then-cache
+  pattern, but caches every track in the playlist to
+  `~/.cache/mini-vinyl/youtube/playlists/` and adds each one to the same
+  `library.json`; every tap - cached or not - plays the tracks back in a
+  freshly shuffled order.

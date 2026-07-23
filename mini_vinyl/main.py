@@ -13,7 +13,6 @@ from mini_vinyl.config import TagEntry, load_secrets, env
 from mini_vinyl.nfc_reader import NfcReader
 from mini_vinyl.player_manager import PlayerManager
 from mini_vinyl.players.youtube_player import YoutubePlayer
-from mini_vinyl.players.spotify_player import SpotifyPlayer
 
 # How many consecutive empty polls before we consider the tag removed.
 # The PN532 occasionally misses a poll even while a tag sits still, so a
@@ -37,8 +36,6 @@ def run_scan() -> None:
 
 
 def tag_entry_from_uri(uid: str, uri: str) -> TagEntry:
-    if uri.startswith("spotify:"):
-        return TagEntry(uid=uid, type="spotify", id=uri)
     return TagEntry(uid=uid, type="youtube", id=uri)
 
 
@@ -51,11 +48,6 @@ def run_player() -> None:
     )
 
     players = {"youtube": YoutubePlayer(audio_output=env("AUDIO_OUTPUT", "pipewire"))}
-
-    if env("SPOTIFY_CLIENT_ID") and env("SPOTIFY_CLIENT_SECRET"):
-        players["spotify"] = SpotifyPlayer(device_name=env("SPOTIFY_DEVICE_NAME", "mini-vinyl"))
-    else:
-        print("[main] Spotify not configured - spotify: tags will be ignored")
 
     manager = PlayerManager(players)
 
