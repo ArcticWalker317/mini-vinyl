@@ -3,11 +3,16 @@ PipeWire - which is what Raspberry Pi OS Bookworm/Trixie use for
 Bluetooth A2DP audio out of the box (no bluealsa needed/wanted; running
 both fights over the BlueZ audio profile).
 
-A tag's content (`TagEntry.id`) is either a raw YouTube URL (written
-directly to the tag, the original workflow) or a bare "code" - a
-`<song_title>-<artist>` string with no URL scheme, burned onto the tag by
-the web "search & add" UI (mini_vinyl/web.py) after a song has already
-been added to the library. Catalog/download/naming logic all lives in
+A tag's content (`TagEntry.id`) is one of three things: a raw YouTube URL
+(written directly to the tag, the original workflow), a bare song
+"code" - a `<song_title>-<artist>` string with no URL scheme, burned onto
+the tag by the web "search & add" UI (mini_vinyl/web.py) after a song has
+already been added to the library - or a bare playlist code,
+`playlist:<slug>`, for a locally-built playlist
+(mini_vinyl/playlists.py's `PlaylistStore` - a hand-picked set of
+already-downloaded library songs, built entirely through the web UI;
+there's no way to add a YouTube playlist *URL* directly, only individual
+videos). Catalog/download/naming logic all lives in
 mini_vinyl/library.py's `Library`, shared with the web UI; this module
 only handles the actual playback process management.
 
@@ -16,17 +21,17 @@ single-core CPU (tens of seconds), so the first play of an uncached
 URL-tag streams live via mpv. If it's still playing CACHE_AFTER_SECONDS
 later (i.e. it wasn't just a brief/accidental tap), a background download
 to disk as WAV starts too - independent of the mpv process, so lifting
-the tag after that point doesn't stop it. A code-tag has no live-stream
-fallback at all: a code only ever exists once the web UI's Add flow has
-already reserved/started downloading it, so a code with nothing cached
-yet just logs an error and plays nothing.
+the tag after that point doesn't stop it. A code-tag (song or playlist)
+has no live-stream fallback at all: both only ever exist once something's
+already been fully downloaded, so a code with nothing cached yet just
+logs an error and plays nothing.
 
-Every cached play (whether reached via a URL-tag cache hit or a
-code-tag) uses `pw-play` (PipeWire's own minimal player) instead of mpv -
-mpv's dependency stack (FFmpeg, libplacebo, etc.) takes several seconds
-of pure CPU time just to start on this hardware regardless of what it's
-playing, while pw-play plays raw PCM/WAV with essentially no startup
-cost.
+Every cached play (whether reached via a URL-tag cache hit, a song code,
+or a playlist code) uses `pw-play` (PipeWire's own minimal player)
+instead of mpv - mpv's dependency stack (FFmpeg, libplacebo, etc.) takes
+several seconds of pure CPU time just to start on this hardware
+regardless of what it's playing, while pw-play plays raw PCM/WAV with
+essentially no startup cost.
 
 Lifting a tag mid-song and placing the *same* tag back on resumes from
 where it got to (only once it's playing from the cached, near-instant
@@ -39,18 +44,13 @@ point is ever remembered at a time: playing any *different* tag - even
 briefly - invalidates it, so going back to the original later always
 starts from the beginning rather than resuming a stale position. A song
 that finishes playing to completion also clears its own resume point.
+Playlists never resume, unlike single songs - every placement reshuffles
+and plays from track one.
 
-A tag whose URL is a YouTube *playlist* (has a `list=` query param) gets
-its own path: every placement reshuffles and plays from track one - there
-is no mid-playlist resume, unlike single videos, and playlists have no
-code-tag equivalent (they're not reachable through the web Add flow).
-The first time a playlist tag is seen, mpv streams it live with
-`--shuffle` (mpv resolves and shuffles the playlist itself), and if it's
-still playing CACHE_AFTER_SECONDS later a background yt-dlp job (via
-Library) downloads every track in the playlist to its own directory.
-Once that finishes, later placements shuffle the list of local files in
-Python and play them back to back through `pw-play`, one track at a
-time.
+A playlist (local playlist code only - see above) is shuffle-played by
+resolving its songs to on-disk paths and feeding them to
+_start_playlist_queue/_run_playlist_queue, which plays them back to back
+through `pw-play`, one track at a time.
 """
 
 import hashlib
@@ -60,17 +60,14 @@ import threading
 import time
 import wave
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 from mini_vinyl.config import TagEntry
 from mini_vinyl.library import Library
 from mini_vinyl.players.base import Player
+from mini_vinyl.playlists import CODE_PREFIX as PLAYLIST_CODE_PREFIX
+from mini_vinyl.playlists import PlaylistStore
 
 CACHE_AFTER_SECONDS = 3.0
-
-
-def _is_playlist_url(url: str) -> bool:
-    return "list" in parse_qs(urlparse(url).query)
 
 
 def _looks_like_url(value: str) -> bool:
@@ -78,8 +75,9 @@ def _looks_like_url(value: str) -> bool:
 
 
 class YoutubePlayer(Player):
-    def __init__(self, library: Library, audio_output: str = "pipewire"):
+    def __init__(self, library: Library, playlist_store: PlaylistStore, audio_output: str = "pipewire"):
         self._library = library
+        self._playlist_store = playlist_store
         self._audio_output = audio_output
         self._proc: subprocess.Popen | None = None
 
@@ -111,9 +109,13 @@ class YoutubePlayer(Player):
     def _resolve_resume_key(self, tag_id: str) -> str | None:
         """The underlying YouTube URL a tag's resume state is keyed by -
         the tag's own id for a URL-tag, or the looked-up url for a
-        code-tag (None if the code isn't in the library at all)."""
+        code-tag (None if the code isn't in the library at all). A
+        playlist-code tag has no resume key at all - local playlists
+        never resume, same as YouTube playlist tags."""
         if _looks_like_url(tag_id):
             return tag_id
+        if tag_id.startswith(PLAYLIST_CODE_PREFIX):
+            return None
         entry = self._library.get_by_code(tag_id)
         return entry["url"] if entry else None
 
@@ -138,10 +140,9 @@ class YoutubePlayer(Player):
         self._reset_stale_pause(resume_key)
 
         if _looks_like_url(tag.id):
-            if _is_playlist_url(tag.id):
-                self._play_playlist(tag)
-            else:
-                self._play_url(tag.id, resume_key)
+            self._play_url(tag.id, resume_key)
+        elif tag.id.startswith(PLAYLIST_CODE_PREFIX):
+            self._play_local_playlist(tag.id[len(PLAYLIST_CODE_PREFIX) :])
         else:
             self._play_code(tag.id, resume_key)
 
@@ -282,38 +283,17 @@ class YoutubePlayer(Player):
         self._current_is_cached = False
         self._played_since = None
 
-    def _play_playlist(self, tag: TagEntry) -> None:
-        playlist_dir = self._library.playlist_dir(tag.id)
-        tracks = self._library.cached_playlist_tracks(playlist_dir)
+    def _play_local_playlist(self, playlist_code: str) -> None:
+        tracks = self._playlist_store.track_paths(playlist_code)
+        if not tracks:
+            print(f"[youtube] playlist {playlist_code!r} has no playable tracks")
+            return
 
-        if tracks:
-            random.shuffle(tracks)
-            print(f"[youtube] playing playlist {tag.id} from cache, shuffled ({len(tracks)} tracks)")
-            self._start_playlist_queue(tracks)
-        else:
-            print(f"[youtube] playing playlist {tag.id} live, shuffled")
-            self._proc = subprocess.Popen(
-                [
-                    "mpv",
-                    "--no-video",
-                    "--shuffle",
-                    "--ytdl-format=bestaudio",
-                    f"--ao={self._audio_output}",
-                    "--really-quiet",
-                    tag.id,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self._cache_timer = threading.Timer(
-                CACHE_AFTER_SECONDS,
-                self._library.maybe_start_playlist_download,
-                args=(tag.id, playlist_dir),
-            )
-            self._cache_timer.daemon = True
-            self._cache_timer.start()
+        random.shuffle(tracks)
+        print(f"[youtube] playing local playlist {playlist_code!r}, shuffled ({len(tracks)} tracks)")
+        self._start_playlist_queue(tracks)
 
-        self._current_url = tag.id
+        self._current_url = f"{PLAYLIST_CODE_PREFIX}{playlist_code}"
         self._played_since = time.time()
 
     def _start_playlist_queue(self, tracks: list[Path]) -> None:

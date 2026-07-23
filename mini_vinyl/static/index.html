@@ -56,6 +56,17 @@
     gap: 2.5rem;
     text-align: center;
   }
+  .home-brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .home-logo {
+    width: 140px;
+    height: 140px;
+    object-fit: contain;
+  }
   .home-title {
     font-size: 2.2rem;
     margin: 0;
@@ -159,9 +170,24 @@
     margin-top: 0.5rem;
     min-height: 1.2em;
   }
-  #library-empty {
+  #library-empty, #playlists-empty, #playlist-songs-empty {
     color: var(--muted);
     font-size: 0.9rem;
+  }
+  #playlists-status {
+    color: var(--err);
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+  }
+  #playlist-song-search {
+    width: 100%;
+    margin: 0.5rem 0;
+  }
+  #write-playlist {
+    margin-top: 2rem;
+  }
+  .item.clickable {
+    cursor: pointer;
   }
   .overlay {
     position: fixed;
@@ -210,7 +236,10 @@
 <body>
 <main>
   <section class="screen home-screen" id="screen-home">
-    <h1 class="home-title">mini-vinyl</h1>
+    <div class="home-brand">
+      <img class="home-logo" src="/static/vinyl_logo.png" alt="">
+      <h1 class="home-title">mini-vinyl</h1>
+    </div>
     <div class="home-buttons">
       <button type="button" class="wide" id="nav-add">Add Songs</button>
       <button type="button" class="wide" id="nav-library">View Library</button>
@@ -230,7 +259,10 @@
       <h2 class="section">Already downloaded songs</h2>
       <ul class="list" id="already-downloaded"></ul>
     </div>
-    <ul class="list" id="results"></ul>
+    <div id="to-add-section" hidden>
+      <h2 class="section">Add:</h2>
+      <ul class="list" id="results"></ul>
+    </div>
   </section>
 
   <section class="screen" id="screen-library" hidden>
@@ -238,6 +270,31 @@
     <h1>Your Library</h1>
     <div id="library-empty">Nothing added yet.</div>
     <ul class="list" id="library"></ul>
+  </section>
+
+  <section class="screen" id="screen-playlists" hidden>
+    <button type="button" class="back" id="back-from-playlists">&larr; Back</button>
+    <h1>Playlists</h1>
+    <form id="create-playlist-form">
+      <input type="text" id="playlist-name" placeholder="New playlist name..." autocomplete="off">
+      <button type="submit">Create</button>
+    </form>
+    <div id="playlists-status"></div>
+    <div id="playlists-empty">No playlists yet.</div>
+    <ul class="list" id="playlists-list"></ul>
+  </section>
+
+  <section class="screen" id="screen-playlist-detail" hidden>
+    <button type="button" class="back" id="back-from-playlist-detail">&larr; Back</button>
+    <h1 id="playlist-detail-title"></h1>
+    <div id="playlist-songs-empty">No songs added yet.</div>
+    <ul class="list" id="playlist-songs"></ul>
+
+    <h2 class="section">Add from your library</h2>
+    <input type="text" id="playlist-song-search" placeholder="Search your downloaded songs..." autocomplete="off">
+    <ul class="list" id="playlist-song-results"></ul>
+
+    <button type="button" class="wide" id="write-playlist" disabled>Write playlist to tag</button>
   </section>
 </main>
 
@@ -259,8 +316,18 @@ const resultsEl = document.getElementById("results");
 const statusMsgEl = document.getElementById("status-msg");
 const alreadyDownloadedSectionEl = document.getElementById("already-downloaded-section");
 const alreadyDownloadedEl = document.getElementById("already-downloaded");
+const toAddSectionEl = document.getElementById("to-add-section");
 const libraryEl = document.getElementById("library");
 const libraryEmptyEl = document.getElementById("library-empty");
+const playlistsListEl = document.getElementById("playlists-list");
+const playlistsEmptyEl = document.getElementById("playlists-empty");
+const playlistsStatusEl = document.getElementById("playlists-status");
+const playlistDetailTitleEl = document.getElementById("playlist-detail-title");
+const playlistSongsEl = document.getElementById("playlist-songs");
+const playlistSongsEmptyEl = document.getElementById("playlist-songs-empty");
+const playlistSongSearchEl = document.getElementById("playlist-song-search");
+const playlistSongResultsEl = document.getElementById("playlist-song-results");
+const writePlaylistBtn = document.getElementById("write-playlist");
 const overlayEl = document.getElementById("overlay");
 const modalCodeEl = document.getElementById("modal-code");
 const writeStatusEl = document.getElementById("write-status");
@@ -290,9 +357,14 @@ document.getElementById("nav-library").addEventListener("click", () => {
   showScreen("screen-library");
   refreshLibrary();
 });
-// "Create Playlist" is a placeholder - intentionally does nothing yet.
+document.getElementById("nav-playlist").addEventListener("click", () => {
+  showScreen("screen-playlists");
+  refreshPlaylists();
+});
 document.getElementById("back-from-add").addEventListener("click", () => showScreen("screen-home"));
 document.getElementById("back-from-library").addEventListener("click", () => showScreen("screen-home"));
+document.getElementById("back-from-playlists").addEventListener("click", () => showScreen("screen-home"));
+document.getElementById("back-from-playlist-detail").addEventListener("click", () => showScreen("screen-playlists"));
 
 document.getElementById("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -303,6 +375,7 @@ document.getElementById("search-form").addEventListener("submit", async (e) => {
   resultsEl.innerHTML = "";
   alreadyDownloadedEl.innerHTML = "";
   alreadyDownloadedSectionEl.hidden = true;
+  toAddSectionEl.hidden = true;
 
   try {
     const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
@@ -324,6 +397,7 @@ document.getElementById("search-form").addEventListener("submit", async (e) => {
     for (const r of toAdd) {
       resultsEl.appendChild(renderResult(r));
     }
+    toAddSectionEl.hidden = toAdd.length === 0;
   } catch (err) {
     statusMsgEl.textContent = "Search failed - is the Pi reachable?";
   }
@@ -438,6 +512,170 @@ function renderLibraryEntry(entry) {
 
   return li;
 }
+
+// ---- Playlists ----
+
+let currentPlaylistCode = null;
+let downloadedSongsCache = []; // "ready" library entries, refreshed on entering a playlist's detail screen
+
+document.getElementById("create-playlist-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const nameInput = document.getElementById("playlist-name");
+  const name = nameInput.value.trim();
+  if (!name) return;
+
+  playlistsStatusEl.textContent = "";
+  try {
+    const res = await fetch("/api/playlists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const playlist = await res.json();
+    if (playlist.error) {
+      playlistsStatusEl.textContent = playlist.error;
+      return;
+    }
+    nameInput.value = "";
+    openPlaylistDetail(playlist.code);
+  } catch (err) {
+    playlistsStatusEl.textContent = "Couldn't reach the Pi.";
+  }
+});
+
+async function refreshPlaylists() {
+  let data;
+  try {
+    const res = await fetch("/api/playlists");
+    data = await res.json();
+  } catch (err) {
+    return; // transient network hiccup
+  }
+
+  playlistsListEl.innerHTML = "";
+  playlistsEmptyEl.hidden = data.playlists.length > 0;
+  for (const p of data.playlists) {
+    playlistsListEl.appendChild(renderPlaylistListItem(p));
+  }
+}
+
+function renderPlaylistListItem(p) {
+  const li = document.createElement("li");
+  li.className = "item clickable";
+  li.innerHTML = `
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
+    </div>
+  `;
+  li.querySelector(".item-title").textContent = p.name;
+  li.querySelector(".item-sub").textContent = `${p.songs.length} song${p.songs.length === 1 ? "" : "s"}`;
+  li.addEventListener("click", () => openPlaylistDetail(p.code));
+  return li;
+}
+
+async function openPlaylistDetail(code) {
+  currentPlaylistCode = code;
+  playlistSongSearchEl.value = "";
+  playlistSongResultsEl.innerHTML = "";
+  showScreen("screen-playlist-detail");
+  await Promise.all([loadPlaylistDetail(), loadDownloadedSongsCache()]);
+}
+
+async function loadPlaylistDetail() {
+  try {
+    const res = await fetch(`/api/playlists/${encodeURIComponent(currentPlaylistCode)}`);
+    const playlist = await res.json();
+    if (playlist.error) return;
+
+    playlistDetailTitleEl.textContent = playlist.name;
+    playlistSongsEl.innerHTML = "";
+    playlistSongsEmptyEl.hidden = playlist.songs.length > 0;
+    for (const song of playlist.songs) {
+      playlistSongsEl.appendChild(renderPlaylistSong(song));
+    }
+    writePlaylistBtn.disabled = playlist.songs.length === 0;
+  } catch (err) {
+    // transient network hiccup - next interaction can retry
+  }
+}
+
+function renderPlaylistSong(song) {
+  const li = document.createElement("li");
+  li.className = "item";
+  li.innerHTML = `
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
+    </div>
+    <button type="button" class="small secondary">Remove</button>
+  `;
+  li.querySelector(".item-title").textContent = song.title;
+  li.querySelector(".item-sub").textContent = song.artist || "";
+  li.querySelector("button").addEventListener("click", async () => {
+    await fetch(
+      `/api/playlists/${encodeURIComponent(currentPlaylistCode)}/songs/${encodeURIComponent(song.code)}`,
+      { method: "DELETE" }
+    );
+    loadPlaylistDetail();
+  });
+  return li;
+}
+
+async function loadDownloadedSongsCache() {
+  try {
+    const res = await fetch("/api/library");
+    const data = await res.json();
+    downloadedSongsCache = data.entries.filter((e) => e.status === "ready");
+  } catch (err) {
+    downloadedSongsCache = [];
+  }
+}
+
+playlistSongSearchEl.addEventListener("input", (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  playlistSongResultsEl.innerHTML = "";
+  if (!q) return;
+  const matches = downloadedSongsCache
+    .filter(
+      (entry) =>
+        (entry.title || "").toLowerCase().includes(q) || (entry.artist || "").toLowerCase().includes(q)
+    )
+    .slice(0, 20);
+  for (const entry of matches) {
+    playlistSongResultsEl.appendChild(renderPlaylistSongResult(entry));
+  }
+});
+
+function renderPlaylistSongResult(entry) {
+  const li = document.createElement("li");
+  li.className = "item";
+  li.innerHTML = `
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
+    </div>
+    <button type="button" class="small">Add</button>
+  `;
+  li.querySelector(".item-title").textContent = entry.title;
+  li.querySelector(".item-sub").textContent = entry.artist || "";
+  const btn = li.querySelector("button");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    await fetch(`/api/playlists/${encodeURIComponent(currentPlaylistCode)}/songs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ song_code: entry.code }),
+    });
+    btn.textContent = "Added ✓";
+    loadPlaylistDetail();
+  });
+  return li;
+}
+
+writePlaylistBtn.addEventListener("click", () => {
+  if (currentPlaylistCode) openWriteModal(`playlist:${currentPlaylistCode}`);
+});
 
 function openWriteModal(code) {
   overlayEl.hidden = false;

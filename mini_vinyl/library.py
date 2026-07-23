@@ -33,7 +33,6 @@ permanently spoken for, download or no download; a retry just resumes
 from the download step rather than re-probing or re-slugifying.
 """
 
-import hashlib
 import json
 import queue
 import re
@@ -85,7 +84,6 @@ class Library:
         self._entries: dict[str, dict] = self._load()
 
         self._in_flight: set[str] = set()  # single-track urls with a download running
-        self._caching_playlists: set[str] = set()  # playlist urls with a download running
 
         # Single sequential worker: on a one-core Pi Zero W, running two
         # yt-dlp/ffmpeg processes "concurrently" doesn't get anything done
@@ -140,15 +138,11 @@ class Library:
             "detail": entry.get("detail", ""),
         }
 
-    def _unique_filename_locked(self, dest_dir: Path, filename: str, *, check_catalog: bool) -> str:
+    def _unique_filename_locked(self, dest_dir: Path, filename: str) -> str:
         def taken(name: str) -> bool:
             if (dest_dir / name).exists():
                 return True
-            if check_catalog:
-                return any(
-                    e.get("file") and Path(e["file"]) == Path(name) for e in self._entries.values()
-                )
-            return False
+            return any(e.get("file") and Path(e["file"]) == Path(name) for e in self._entries.values())
 
         if not taken(filename):
             return filename
@@ -168,10 +162,13 @@ class Library:
             return entry if (self._cache_dir / entry["file"]).exists() else None
 
     def get_by_code(self, code: str) -> dict | None:
-        # Only top-level cache_dir entries are code-addressable - playlist
-        # tracks live under playlists/<hash>/ (more than one path part) and
-        # never go through the add-queue, so they're excluded here by
-        # construction rather than an explicit check.
+        # Only top-level cache_dir entries are code-addressable. Nothing
+        # written from here on ever has a multi-part `file` path, but a
+        # library.json from before YouTube-playlist-URL caching was
+        # removed may still have leftover playlist-track entries whose
+        # `file` points into a playlists/<hash>/ subdirectory - the
+        # part-count check keeps those correctly un-addressable rather
+        # than surfacing them as if they were directly-added songs.
         with self._lock:
             for entry in self._entries.values():
                 if entry.get("status") != "ready" or not entry.get("file"):
@@ -332,7 +329,6 @@ class Library:
                     self._cache_dir,
                     f"{_slugify(info['title'], _MAX_TITLE_SLUG_LEN)}-"
                     f"{_slugify(info['artist'], _MAX_ARTIST_SLUG_LEN)}.wav",
-                    check_catalog=True,
                 )
                 entry = self._entries.get(url)
                 if entry is None:
@@ -359,7 +355,7 @@ class Library:
     def finalize(self, url: str, tmp_path: Path) -> Path | None:
         """Renames a completed download into its pre-reserved final path
         and marks the entry ready. `url` must already have a claimed
-        filename (status in _HAS_CODE_STATUSES)."""
+        filename (entry["file"] set)."""
         with self._lock:
             entry = self._entries.get(url)
             if entry is None or not entry.get("file") or not tmp_path.exists():
@@ -474,7 +470,7 @@ class Library:
                 return
             with self._lock:
                 filename = self._unique_filename_locked(
-                    self._cache_dir, f"{_slugify(title)}-{_slugify(artist)}.wav", check_catalog=True
+                    self._cache_dir, f"{_slugify(title)}-{_slugify(artist)}.wav"
                 )
                 final_path = self._cache_dir / filename
                 tmp_path.rename(final_path)
@@ -482,74 +478,3 @@ class Library:
         finally:
             with self._lock:
                 self._in_flight.discard(url)
-
-    # ---- playlists (used by YoutubePlayer) ----
-
-    def playlist_dir(self, url: str) -> Path:
-        key = hashlib.sha256(url.encode()).hexdigest()[:16]
-        return self._cache_dir / "playlists" / key
-
-    def cached_playlist_tracks(self, playlist_dir: Path) -> list[Path]:
-        if not (playlist_dir / ".complete").exists():
-            return []
-        return sorted(playlist_dir.glob("*.wav"))
-
-    def maybe_start_playlist_download(self, url: str, playlist_dir: Path) -> None:
-        with self._lock:
-            if url in self._caching_playlists:
-                return
-            self._caching_playlists.add(url)
-        self._start_playlist_download(url, playlist_dir)
-
-    def _start_playlist_download(self, url: str, playlist_dir: Path) -> None:
-        playlist_dir.mkdir(parents=True, exist_ok=True)
-        output_template = str(playlist_dir / "%(id)s.%(ext)s")
-        proc = subprocess.Popen(
-            [
-                "yt-dlp",
-                "--quiet",
-                "--yes-playlist",
-                "-f",
-                "bestaudio",
-                "-x",
-                "--audio-format",
-                "wav",
-                "--postprocessor-args",
-                "ffmpeg:-map_metadata -1",
-                "--print",
-                f"after_move:%(title)s{_SEP}{_ARTIST_TEMPLATE}{_SEP}%(webpage_url)s{_SEP}%(filepath)s",
-                "-o",
-                output_template,
-                url,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        threading.Thread(
-            target=self._finish_playlist_download, args=(proc, playlist_dir, url), daemon=True
-        ).start()
-
-    def _finish_playlist_download(self, proc: subprocess.Popen, playlist_dir: Path, url: str) -> None:
-        stdout, _ = proc.communicate()
-        if proc.returncode == 0:
-            for line in stdout.strip().splitlines():
-                parts = line.split(_SEP)
-                if len(parts) != 4:
-                    continue
-                title, artist, track_url, filepath = parts
-                tmp_path = Path(filepath)
-                if not tmp_path.exists():
-                    continue
-                with self._lock:
-                    filename = self._unique_filename_locked(
-                        playlist_dir, f"{_slugify(title)}-{_slugify(artist)}.wav", check_catalog=False
-                    )
-                    final_path = playlist_dir / filename
-                    tmp_path.rename(final_path)
-                    self._put_ready_locked(track_url, title, artist, final_path)
-            (playlist_dir / ".complete").touch()
-        else:
-            print(f"[library] playlist download failed for {url} (exit {proc.returncode})")
-        with self._lock:
-            self._caching_playlists.discard(url)

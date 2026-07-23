@@ -7,13 +7,6 @@ plays that video's audio out to a paired Bluetooth speaker. Lifting the
 vinyl stops playback. There's no on-Pi tag-to-song mapping file - the Pi
 just reads whatever URL is written on the tag.
 
-A tag can also hold a YouTube **playlist** URL (any URL with a `list=`
-parameter, e.g. copied from "Share -> Copy link" while viewing a
-playlist). The first tap streams it live in shuffled order while
-downloading every track in the background; once that download finishes,
-every later tap re-shuffles and plays the whole playlist from the
-downloaded files, starting from track one each time.
-
 Every song downloaded to the Pi is saved as `<song_title>-<artist>.wav`
 (e.g. `the_scientist-coldplay.wav`) and recorded in a `library.json`
 catalog alongside the audio files, with each entry's title, artist, and
@@ -25,7 +18,10 @@ Pi starts downloading it while handing back a short code (e.g.
 `the_scientist-coldplay` - literally the filename above, minus `.wav`).
 Place a blank tag on the Pi's own reader and it burns that code straight
 onto the tag - no separate NFC-writer app needed for these. See
-[Adding songs from your phone](#adding-songs-from-your-phone) below.
+[Adding songs from your phone](#adding-songs-from-your-phone) below. The
+same web UI is also the only way to build a **playlist** tag - a
+hand-picked, shuffle-played set of songs you've already downloaded; see
+[Building playlists](#building-playlists).
 
 ## Hardware
 
@@ -112,14 +108,13 @@ Fill in `config/secrets.env` (Bluetooth MAC, etc).
 
 ### Writing tags manually
 
-For playlists, or if you'd rather not use the web UI, use a phone
+If you'd rather not use the web UI for single songs, use a phone
 NFC-writer app (e.g. "NFC Tools" on iOS/Android) to write a single
-**URL/URI record** to each NTAG213/215/216 tag:
-
-- YouTube video: the full video URL, e.g. `https://www.youtube.com/watch?v=...`
-- YouTube playlist: the full playlist URL, e.g.
-  `https://www.youtube.com/playlist?list=...` (any URL with a `list=`
-  parameter works, including a `watch?v=...&list=...` link)
+**URL/URI record** - the full YouTube video URL, e.g.
+`https://www.youtube.com/watch?v=...` - to each NTAG213/215/216 tag.
+Playlist tags can only be created through the web UI (see
+[Building playlists](#building-playlists)); a YouTube playlist *URL*
+written to a tag this way is not specially handled.
 
 Verify a tag was written correctly:
 
@@ -165,13 +160,33 @@ afterward to play the song - no further pairing needed, the code is all
 it takes. If a song shows **Failed**, hit **Retry** - it picks back up
 without re-fetching info it already has.
 
-Only single videos can be added this way; playlists still need to be
-written manually (see above). No auth, no HTTPS - this is meant for a
+Only single videos can be added this way - there's no way to add a
+YouTube playlist through this flow; build a playlist from
+already-downloaded songs instead (see [Building
+playlists](#building-playlists)). No auth, no HTTPS - this is meant for a
 trusted home network only, not for exposing beyond it. Fetching a song's
 info (needed before it can even be queued for download) can itself take
 the better part of a minute per song on this hardware, so a big batch add
 is genuinely a "queue it and come back later" operation, not an
 instant one.
+
+### Building playlists
+
+You can build your own playlists out of songs you've already downloaded -
+this is the only way to make a playlist tag; a YouTube playlist URL
+written directly to a tag is not specially handled. From the home
+screen, **Create Playlist** takes you to a list of your playlists with a
+name field above it to start a new one. Opening a playlist shows its
+current songs (each with a **Remove** button) and a search box that
+filters your already-downloaded library by title/artist - tap **Add** on
+a match to drop it in. There's no reordering, since playback always
+shuffles.
+
+Once it has at least one song, **Write playlist to tag** works exactly
+like writing a single song's tag (same "place a blank tag on the reader"
+flow, same overwrite-refusal safety), just for the whole playlist at
+once. Tapping that tag later shuffle-plays straight through every song in
+it, back to back, re-shuffling on every fresh placement.
 
 ### Run it
 
@@ -220,28 +235,34 @@ or speaker address differ from the placeholders.
 - `mini_vinyl/library.py`'s `Library` owns the song catalog
   (`library.json`) and all downloading: looking up a cached file by URL or
   by code, and running the actual `yt-dlp` downloads (for a
-  tapped-and-cached URL-tag, the web UI's Add flow, and playlist caching)
-  in the background. The web UI's Add flow (`enqueue()`) just records a
-  url and returns immediately; a single persistent background worker
-  thread drains that queue one song at a time - fetching its info,
-  claiming a unique `<song_title>-<artist>.wav` filename/code, then
-  downloading - since running more than one `yt-dlp`/`ffmpeg` process at
-  once wouldn't actually go any faster on a Pi Zero W's single weak core,
-  just contend for it. `Library` is shared between `YoutubePlayer` and
-  `web.py` so both read and write the same in-memory catalog with no
-  cross-process locking needed.
+  tapped-and-cached URL-tag or the web UI's Add flow) in the background.
+  The web UI's Add flow (`enqueue()`) just records a url and returns
+  immediately; a single persistent background worker thread drains that
+  queue one song at a time - fetching its info, claiming a unique
+  `<song_title>-<artist>.wav` filename/code, then downloading - since
+  running more than one `yt-dlp`/`ffmpeg` process at once wouldn't
+  actually go any faster on a Pi Zero W's single weak core, just contend
+  for it. `Library` is shared between `YoutubePlayer` and `web.py` so
+  both read and write the same in-memory catalog with no cross-process
+  locking needed.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
   `yt-dlp` under the hood) and plays audio out through PipeWire, which
-  owns the Bluetooth speaker's A2DP sink. A tag's content is either a raw
-  YouTube URL or a bare library "code" (see below); resolving a YouTube
-  URL live is slow on Zero W hardware, so an uncached URL-tag streams live
-  via `mpv` first, and if it's still playing after a few seconds, a
-  background download starts too - later plays of that tag (or of a
-  code-tag, once its download has finished) find the cached file and
-  start instantly via `pw-play`, with no live resolution involved. A
-  playlist URL (`list=...`) follows the same live-then-cache pattern, but
-  caches every track in the playlist to
-  `~/.cache/mini-vinyl/youtube/playlists/` and adds each one to the same
-  `library.json`; every tap - cached or not - plays the tracks back in a
-  freshly shuffled order. Playlists have no code-tag equivalent; they're
-  only addable by writing the URL manually.
+  owns the Bluetooth speaker's A2DP sink. A tag's content is a raw
+  YouTube video URL, a bare library "code", or a local playlist code
+  (`playlist:<slug>`, see below); resolving a YouTube URL live is slow on
+  Zero W hardware, so an uncached URL-tag streams live via `mpv` first,
+  and if it's still playing after a few seconds, a background download
+  starts too - later plays of that tag (or of a code-tag, once its
+  download has finished) find the cached file and start instantly via
+  `pw-play`, with no live resolution involved. A playlist code has no
+  live/caching phase at all - it's always shuffle-played by resolving its
+  songs to on-disk paths and feeding them through the same queue
+  mechanism, one track at a time, since every song in it is already a
+  "ready" download by construction.
+- `mini_vinyl/playlists.py`'s `PlaylistStore` owns locally-built
+  playlists (`playlists.json`, alongside `library.json`) - just an
+  ordered list of song codes per playlist, resolved to on-disk paths
+  through `Library` at playback time. Writing a playlist to a tag reuses
+  the exact same write flow as a song (`mini_vinyl/tag_writer.py`
+  doesn't care what the code string is), just with the `playlist:` prefix
+  telling `YoutubePlayer` which store to look it up in.

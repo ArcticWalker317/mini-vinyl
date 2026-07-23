@@ -16,6 +16,7 @@ from mini_vinyl.library import Library
 from mini_vinyl.nfc_reader import NfcReader
 from mini_vinyl.player_manager import PlayerManager
 from mini_vinyl.players.youtube_player import YoutubePlayer
+from mini_vinyl.playlists import PlaylistStore
 from mini_vinyl.tag_writer import WriteCoordinator, WriteRequest
 
 # How many consecutive empty polls before we consider the tag removed.
@@ -65,8 +66,8 @@ def _handle_pending_write(
     return False
 
 
-def _start_web_ui(library: Library, write_coordinator: WriteCoordinator) -> None:
-    app = web.create_app(library, write_coordinator)
+def _start_web_ui(library: Library, playlist_store: PlaylistStore, write_coordinator: WriteCoordinator) -> None:
+    app = web.create_app(library, playlist_store, write_coordinator)
     thread = threading.Thread(
         target=app.run,
         kwargs={"host": "0.0.0.0", "port": WEB_PORT, "threaded": True, "use_reloader": False},
@@ -85,12 +86,15 @@ def run_player() -> None:
     )
 
     library = Library()
+    playlist_store = PlaylistStore(library)
     write_coordinator = WriteCoordinator()
-    players = {"youtube": YoutubePlayer(library, audio_output=env("AUDIO_OUTPUT", "pipewire"))}
+    players = {
+        "youtube": YoutubePlayer(library, playlist_store, audio_output=env("AUDIO_OUTPUT", "pipewire"))
+    }
 
     manager = PlayerManager(players)
 
-    _start_web_ui(library, write_coordinator)
+    _start_web_ui(library, playlist_store, write_coordinator)
 
     # UID -> URI, populated as tags are read. Re-reading all 12 NDEF pages
     # over I2C on every single tap is real overhead on this hardware; a
