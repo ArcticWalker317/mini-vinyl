@@ -5,8 +5,8 @@ Wants=librespot.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/mini-vinyl
-ExecStart=%h/mini-vinyl/venv/bin/python -m mini_vinyl.main
+WorkingDirectory=%h/Projects/mini-vinyl
+ExecStart=%h/Projects/mini-vinyl/venv/bin/python -m mini_vinyl.main
 Restart=on-failure
 RestartSec=3
 
