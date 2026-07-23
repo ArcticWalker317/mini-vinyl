@@ -15,6 +15,11 @@ PlaylistStore) - hand-picked sets of already-downloaded songs. Writing one
 to a tag reuses the exact same /api/write flow as a song; a playlist's
 code just carries the "playlist:" prefix PlaylistStore/YoutubePlayer use
 to tell the two apart.
+
+/api/settings/* is a thin HTTP wrapper around mini_vinyl/bluetooth.py,
+network.py, and audio.py - each just shells out to a system tool
+(bluetoothctl, nmcli, wpctl) and reflects its live state back; nothing
+here is state this project owns or persists itself.
 """
 
 import logging
@@ -22,6 +27,9 @@ import subprocess
 
 from flask import Flask, request, send_from_directory
 
+from mini_vinyl import audio
+from mini_vinyl import bluetooth as bt
+from mini_vinyl import network as net
 from mini_vinyl.library import Library
 from mini_vinyl.playlists import CODE_PREFIX as PLAYLIST_CODE_PREFIX
 from mini_vinyl.playlists import PlaylistStore
@@ -36,6 +44,9 @@ from mini_vinyl.tag_writer import WriteCoordinator
 _QUIET_PATHS = (
     "/api/write/status",
     "/api/library",
+    "/api/settings/wifi",
+    "/api/settings/volume",
+    "/api/settings/bluetooth/devices",
     "/favicon.ico",
     "/apple-touch-icon.png",
     "/apple-touch-icon-precomposed.png",
@@ -197,5 +208,63 @@ def create_app(library: Library, playlist_store: PlaylistStore, write_coordinato
         if not code:
             return {"error": "code is required"}, 400
         return write_coordinator.status_for(code)
+
+    @app.get("/api/settings/wifi")
+    def wifi_status():
+        return net.wifi_status()
+
+    @app.get("/api/settings/volume")
+    def get_volume():
+        return audio.get_volume()
+
+    @app.post("/api/settings/volume")
+    def set_volume():
+        data = request.get_json(silent=True) or {}
+        level = data.get("level")
+        if not isinstance(level, (int, float)):
+            return {"error": "level is required"}, 400
+        if not audio.set_volume(int(level)):
+            return {"error": "couldn't set volume"}, 502
+        return audio.get_volume()
+
+    @app.post("/api/settings/mute")
+    def set_mute():
+        data = request.get_json(silent=True) or {}
+        if not audio.set_mute(bool(data.get("muted"))):
+            return {"error": "couldn't set mute"}, 502
+        return audio.get_volume()
+
+    @app.get("/api/settings/bluetooth/devices")
+    def bluetooth_devices():
+        return {"devices": bt.list_paired()}
+
+    @app.post("/api/settings/bluetooth/scan")
+    def bluetooth_scan():
+        return {"devices": bt.scan()}
+
+    @app.post("/api/settings/bluetooth/pair")
+    def bluetooth_pair():
+        data = request.get_json(silent=True) or {}
+        mac = (data.get("mac") or "").strip()
+        if not mac:
+            return {"error": "mac is required"}, 400
+        success, detail = bt.pair(mac)
+        return {"success": success, "detail": detail}
+
+    @app.post("/api/settings/bluetooth/connect")
+    def bluetooth_connect():
+        data = request.get_json(silent=True) or {}
+        mac = (data.get("mac") or "").strip()
+        if not mac:
+            return {"error": "mac is required"}, 400
+        return {"success": bt.connect(mac)}
+
+    @app.post("/api/settings/bluetooth/disconnect")
+    def bluetooth_disconnect():
+        data = request.get_json(silent=True) or {}
+        mac = (data.get("mac") or "").strip()
+        if not mac:
+            return {"error": "mac is required"}, 400
+        return {"success": bt.disconnect(mac)}
 
     return app

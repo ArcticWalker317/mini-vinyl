@@ -178,6 +178,34 @@
   .item.clickable {
     cursor: pointer;
   }
+  #wifi-status, #bluetooth-paired-empty {
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  #bluetooth-scan-status {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin: 0.5rem 0;
+    min-height: 1.2em;
+  }
+  #bluetooth-scan {
+    margin-top: 1rem;
+  }
+  .volume-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.5rem 0 1rem;
+  }
+  .volume-row input[type="range"] {
+    flex: 1;
+  }
+  #volume-label {
+    width: 3.5rem;
+    text-align: right;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
   .overlay {
     position: fixed;
     inset: 0;
@@ -233,6 +261,7 @@
       <button type="button" class="wide" id="nav-add">Add Songs</button>
       <button type="button" class="wide" id="nav-library">View Library</button>
       <button type="button" class="wide secondary" id="nav-playlist">Playlists</button>
+      <button type="button" class="wide secondary" id="nav-settings">Settings</button>
     </div>
   </section>
 
@@ -285,6 +314,29 @@
 
     <button type="button" class="wide" id="write-playlist" disabled>Write playlist to tag</button>
   </section>
+
+  <section class="screen" id="screen-settings" hidden>
+    <button type="button" class="back" id="back-from-settings">&larr; Back</button>
+    <h1>Settings</h1>
+
+    <h2 class="section">Wi-Fi</h2>
+    <div id="wifi-status">Loading…</div>
+
+    <h2 class="section">Volume</h2>
+    <div class="volume-row">
+      <input type="range" id="volume-slider" min="0" max="100" value="0">
+      <span id="volume-label">--%</span>
+    </div>
+    <button type="button" class="secondary small" id="mute-toggle">Mute</button>
+
+    <h2 class="section">Bluetooth</h2>
+    <div id="bluetooth-paired-empty">No paired devices.</div>
+    <ul class="list" id="bluetooth-paired"></ul>
+
+    <button type="button" class="secondary" id="bluetooth-scan">Scan for devices</button>
+    <div id="bluetooth-scan-status"></div>
+    <ul class="list" id="bluetooth-discovered"></ul>
+  </section>
 </main>
 
 <div class="overlay" id="overlay" hidden>
@@ -317,6 +369,15 @@ const playlistSongsEmptyEl = document.getElementById("playlist-songs-empty");
 const playlistSongSearchEl = document.getElementById("playlist-song-search");
 const playlistSongResultsEl = document.getElementById("playlist-song-results");
 const writePlaylistBtn = document.getElementById("write-playlist");
+const wifiStatusEl = document.getElementById("wifi-status");
+const volumeSliderEl = document.getElementById("volume-slider");
+const volumeLabelEl = document.getElementById("volume-label");
+const muteToggleBtn = document.getElementById("mute-toggle");
+const bluetoothPairedEl = document.getElementById("bluetooth-paired");
+const bluetoothPairedEmptyEl = document.getElementById("bluetooth-paired-empty");
+const bluetoothScanBtn = document.getElementById("bluetooth-scan");
+const bluetoothScanStatusEl = document.getElementById("bluetooth-scan-status");
+const bluetoothDiscoveredEl = document.getElementById("bluetooth-discovered");
 const overlayEl = document.getElementById("overlay");
 const modalCodeEl = document.getElementById("modal-code");
 const writeStatusEl = document.getElementById("write-status");
@@ -362,6 +423,20 @@ document.getElementById("back-from-playlist-detail").addEventListener("click", a
   }
   showScreen("screen-playlists");
   refreshPlaylists();
+});
+
+let settingsPollHandle = null;
+
+document.getElementById("nav-settings").addEventListener("click", () => {
+  showScreen("screen-settings");
+  refreshSettings();
+  if (settingsPollHandle) clearInterval(settingsPollHandle);
+  settingsPollHandle = setInterval(refreshSettings, 5000);
+});
+document.getElementById("back-from-settings").addEventListener("click", () => {
+  if (settingsPollHandle) clearInterval(settingsPollHandle);
+  settingsPollHandle = null;
+  showScreen("screen-home");
 });
 
 document.getElementById("search-form").addEventListener("submit", async (e) => {
@@ -689,6 +764,176 @@ function renderPlaylistSongResult(entry) {
 writePlaylistBtn.addEventListener("click", () => {
   if (currentPlaylistCode) openWriteModal(`playlist:${currentPlaylistCode}`);
 });
+
+// ---- Settings ----
+
+function refreshSettings() {
+  refreshWifiStatus();
+  refreshVolume();
+  refreshBluetoothPaired();
+}
+
+async function refreshWifiStatus() {
+  try {
+    const res = await fetch("/api/settings/wifi");
+    const data = await res.json();
+    if (data.ssid) {
+      const signalText = data.signal !== null && data.signal !== undefined ? ` (${data.signal}%)` : "";
+      const ipText = data.ip ? ` — ${data.ip}` : "";
+      wifiStatusEl.textContent = `${data.ssid}${signalText}${ipText}`;
+    } else {
+      wifiStatusEl.textContent = "Not connected.";
+    }
+  } catch (err) {
+    wifiStatusEl.textContent = "Couldn't reach the Pi.";
+  }
+}
+
+async function refreshVolume() {
+  try {
+    const res = await fetch("/api/settings/volume");
+    const data = await res.json();
+    if (data.level === null || data.level === undefined) {
+      volumeLabelEl.textContent = "--%";
+      return;
+    }
+    // Don't stomp on the slider while the user's actively dragging it.
+    if (document.activeElement !== volumeSliderEl) {
+      volumeSliderEl.value = data.level;
+    }
+    volumeLabelEl.textContent = `${volumeSliderEl.value}%`;
+    muteToggleBtn.textContent = data.muted ? "Unmute" : "Mute";
+  } catch (err) {
+    // transient network hiccup - next poll will retry
+  }
+}
+
+volumeSliderEl.addEventListener("input", () => {
+  volumeLabelEl.textContent = `${volumeSliderEl.value}%`;
+});
+
+volumeSliderEl.addEventListener("change", () => {
+  fetch("/api/settings/volume", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ level: parseInt(volumeSliderEl.value, 10) }),
+  });
+});
+
+muteToggleBtn.addEventListener("click", async () => {
+  const currentlyMuted = muteToggleBtn.textContent === "Unmute";
+  await fetch("/api/settings/mute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ muted: !currentlyMuted }),
+  });
+  refreshVolume();
+});
+
+async function refreshBluetoothPaired() {
+  let data;
+  try {
+    const res = await fetch("/api/settings/bluetooth/devices");
+    data = await res.json();
+  } catch (err) {
+    return; // transient network hiccup - next poll will retry
+  }
+  bluetoothPairedEl.innerHTML = "";
+  bluetoothPairedEmptyEl.hidden = data.devices.length > 0;
+  for (const d of data.devices) {
+    bluetoothPairedEl.appendChild(renderBluetoothPaired(d));
+  }
+}
+
+function renderBluetoothPaired(d) {
+  const li = document.createElement("li");
+  li.className = "item";
+  li.innerHTML = `
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
+    </div>
+    <button type="button"></button>
+  `;
+  li.querySelector(".item-title").textContent = d.name;
+  li.querySelector(".item-sub").textContent = d.connected ? "Connected" : "Not connected";
+  const btn = li.querySelector("button");
+  btn.className = d.connected ? "small secondary" : "small";
+  btn.textContent = d.connected ? "Disconnect" : "Connect";
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = d.connected ? "Disconnecting…" : "Connecting…";
+    await fetch(`/api/settings/bluetooth/${d.connected ? "disconnect" : "connect"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mac: d.mac }),
+    });
+    refreshBluetoothPaired();
+  });
+  return li;
+}
+
+bluetoothScanBtn.addEventListener("click", async () => {
+  bluetoothScanBtn.disabled = true;
+  bluetoothScanStatusEl.textContent = "Scanning for nearby devices… (about 10 seconds)";
+  bluetoothDiscoveredEl.innerHTML = "";
+  try {
+    const res = await fetch("/api/settings/bluetooth/scan", { method: "POST" });
+    const data = await res.json();
+    if (!data.devices.length) {
+      bluetoothScanStatusEl.textContent = "No new devices found.";
+    } else {
+      bluetoothScanStatusEl.textContent = "";
+      for (const d of data.devices) {
+        bluetoothDiscoveredEl.appendChild(renderBluetoothDiscovered(d));
+      }
+    }
+  } catch (err) {
+    bluetoothScanStatusEl.textContent = "Couldn't reach the Pi.";
+  } finally {
+    bluetoothScanBtn.disabled = false;
+  }
+});
+
+function renderBluetoothDiscovered(d) {
+  const li = document.createElement("li");
+  li.className = "item";
+  li.innerHTML = `
+    <div class="item-text">
+      <div class="item-title"></div>
+      <div class="item-sub"></div>
+    </div>
+    <button type="button" class="small">Pair</button>
+  `;
+  li.querySelector(".item-title").textContent = d.name;
+  li.querySelector(".item-sub").textContent = d.mac;
+  const btn = li.querySelector("button");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Pairing…";
+    try {
+      const res = await fetch("/api/settings/bluetooth/pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mac: d.mac }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        li.remove();
+        refreshBluetoothPaired();
+      } else {
+        btn.disabled = false;
+        btn.textContent = "Pair";
+        bluetoothScanStatusEl.textContent = data.detail || "Pairing failed.";
+      }
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Pair";
+      bluetoothScanStatusEl.textContent = "Couldn't reach the Pi.";
+    }
+  });
+  return li;
+}
 
 function openWriteModal(code) {
   overlayEl.hidden = false;

@@ -52,6 +52,12 @@ hand-picked, shuffle-played set of songs you've already downloaded; see
 > sudo systemctl disable --now bluealsa.service bluealsa-aplay.service
 > ```
 
+> **Wi-Fi status note:** the Settings page's Wi-Fi display uses `nmcli`,
+> which needs NetworkManager as the network stack - the default on
+> Raspberry Pi OS Bookworm/Trixie already, so nothing extra to install
+> there. An older Bullseye-based image using dhcpcd/wpa_supplicant
+> instead won't have `nmcli`, and that section will just show "unknown."
+
 ```bash
 sudo apt update
 sudo apt install -y python3-venv python3-pip i2c-tools bluez bluez-tools \
@@ -84,6 +90,12 @@ bluetoothctl
 > connect AA:BB:CC:DD:EE:FF
 > quit
 ```
+
+Once `mini-vinyl.service` is running, the web UI's [Settings
+page](#settings) can also do this scan/pair/connect/disconnect dance for
+you - this manual route is here mainly as a fallback in case that page's
+scripted `bluetoothctl` session doesn't get along with whatever BlueZ
+version is on your image.
 
 Confirm PipeWire/WirePlumber picked it up as an audio sink:
 
@@ -187,6 +199,32 @@ like writing a single song's tag (same "place a blank tag on the reader"
 flow, same overwrite-refusal safety), just for the whole playlist at
 once. Tapping that tag later shuffle-plays straight through every song in
 it, back to back, re-shuffling on every fresh placement.
+
+### Settings
+
+The home screen's **Settings** button covers the Pi-level things you'd
+otherwise need a terminal for:
+
+- **Wi-Fi** - read-only: shows the currently-connected network's SSID,
+  signal strength, and IP address (the same IP the mDNS fallback in
+  [Adding songs from your phone](#adding-songs-from-your-phone) refers
+  to). There's no way to switch networks from here.
+- **Volume** - a slider controlling the system volume (PipeWire's
+  default audio sink - whatever's currently playing audio, i.e. the
+  connected Bluetooth speaker), plus a Mute toggle.
+- **Bluetooth** - lists paired devices with **Connect**/**Disconnect**
+  per device, and a **Scan for devices** button that discovers nearby
+  unpaired devices for about 10 seconds and offers a **Pair** button for
+  each. Pairing auto-accepts "Just Works" confirmation (what the large
+  majority of Bluetooth speakers/headphones use) without needing to
+  confirm anything on the device itself; one that specifically requires
+  a passkey/numeric-comparison step can't be paired from this page - use
+  [Bluetooth pairing](#bluetooth-pairing) instead.
+
+This all works by shelling out to `bluetoothctl`, `nmcli`, and `wpctl`
+directly (`mini_vinyl/bluetooth.py`, `network.py`, `audio.py`) - nothing
+here is state the app keeps track of itself, it's just a live view onto
+what BlueZ/NetworkManager/PipeWire already report.
 
 ### Run it
 
