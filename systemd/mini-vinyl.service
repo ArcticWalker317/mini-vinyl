@@ -1,7 +1,6 @@
 [Unit]
 Description=mini-vinyl NFC record player
-After=bluetooth.target librespot.service pipewire.service network-online.target
-Wants=librespot.service
+After=bluetooth.target pipewire.service network-online.target
 
 [Service]
 Type=simple
