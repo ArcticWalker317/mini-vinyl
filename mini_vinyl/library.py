@@ -42,10 +42,26 @@ job is cheap to just redo if it's lost on a restart, unlike a download
 that's already claimed a filename, so it doesn't need the same
 durability. The web UI polls search_job_status() to find out what a
 search resolved to (if anything).
+
+Every ready song is also a candidate for autoplay (see YoutubePlayer),
+which draws from the *entire* catalog, not just what's visible in the
+Library tab - which is why some entries can be `hidden`. Once a song
+finishes downloading, _maybe_enrich_artist() queues up a background
+search for a few more likely tracks by the same artist and adds them
+with hidden=True: real, playable, autoplay-eligible catalog entries, just
+excluded from list_entries() so the web UI's Library tab only ever shows
+what was actually asked for. If the user later explicitly adds one of
+those same songs by name, enqueue()'s normal (non-hidden) path flips it
+back to visible rather than downloading a duplicate. Enrichment runs on
+the same download queue/worker as everything else - never a second
+concurrent yt-dlp process - and is self-limiting: _enriched_artists
+tracks which artists have already been searched, so a chain of songs by
+the same artist only triggers one enrichment search, not one per song.
 """
 
 import json
 import queue
+import random
 import re
 import subprocess
 import threading
@@ -74,6 +90,14 @@ _MAX_ARTIST_SLUG_LEN = 30
 # "Remastered", over-weighting it relative to "Official".
 _PREFERRED_TERMS = {"official": 3, "remaster": 2}
 _DEPRIORITIZED_TERMS = {"lyrics": 4, "lyric video": 4, "karaoke": 4}
+
+# Terms that make a "greatest hits" search result a poor pick for silent
+# background enrichment - same spirit as _DEPRIORITIZED_TERMS above, but
+# a hard exclusion here rather than a soft nudge, since there's no user
+# picking among candidates to fall back on.
+_ENRICH_AVOID_TERMS = ("lyrics", "karaoke", "reaction", "cover", "tutorial")
+_ENRICH_PREFIX = "enrich-artist:"
+_ENRICH_PICKS = 3
 
 
 def _slugify(text: str, max_len: int | None = None) -> str:
@@ -141,6 +165,13 @@ class Library:
 
         self._in_flight: set[str] = set()  # single-track urls with a download running
 
+        # Artists (lowercased) that have already had a background
+        # enrichment search run for them - in-memory only, not persisted
+        # (see the module docstring); the cost of forgetting this across
+        # a restart is at most one redundant, self-limiting search per
+        # already-enriched artist, not a correctness issue.
+        self._enriched_artists: set[str] = set()
+
         # Single sequential worker: on a one-core Pi Zero W, running two
         # yt-dlp/ffmpeg processes "concurrently" doesn't get anything done
         # faster, just makes both slower - so the add-queue is drained one
@@ -201,6 +232,7 @@ class Library:
             "title": entry.get("title"),
             "artist": entry.get("artist"),
             "detail": entry.get("detail", ""),
+            "hidden": entry.get("hidden", False),
         }
 
     def _unique_filename_locked(self, dest_dir: Path, filename: str) -> str:
@@ -368,14 +400,25 @@ class Library:
         status = self.enqueue(best["url"])  # idempotent - reuses an existing entry if there is one
         self._resolve_search_job(job_id, "found", code=status["code"])
 
-    def enqueue(self, url: str) -> dict:
+    def enqueue(self, url: str, hidden: bool = False) -> dict:
         """Adds `url` to the add-queue if it isn't already known, or - if
         its last attempt failed - re-queues it for another try. Returns
         its current status immediately; never blocks on probing or
-        downloading, which happen later on the background worker."""
+        downloading, which happen later on the background worker.
+
+        hidden=True (used only by _process_enrich_job) marks a new entry
+        so it's excluded from list_entries() - a real, playable,
+        autoplay-eligible download, just not something the user asked
+        for by name. A non-hidden call (the normal, user-facing path)
+        always clears an existing entry's hidden flag, even if it did
+        nothing else - explicitly asking for a song surfaces it in the
+        Library tab even if it was already sitting there quietly."""
         with self._lock:
             entry = self._entries.get(url)
             if entry is not None and entry["status"] != "failed":
+                if not hidden and entry.get("hidden"):
+                    entry["hidden"] = False
+                    self._save_locked()
                 return self._status_dict_locked(entry)
             if entry is None:
                 self._entries[url] = {
@@ -385,26 +428,60 @@ class Library:
                     "artist": None,
                     "file": None,
                     "detail": "",
+                    "hidden": hidden,
                 }
             else:
                 entry["status"] = "queued"
                 entry["detail"] = ""
+                if not hidden:
+                    entry["hidden"] = False
             self._save_locked()
             status = self._status_dict_locked(self._entries[url])
         self._download_queue.put(url)
         return status
 
     def list_entries(self) -> list[dict]:
-        """Everything ever added through the web UI, most recently added
-        first - playlist tracks excluded (see get_by_code)."""
+        """Everything explicitly added through the web UI, most recently
+        added first - playlist tracks excluded (see get_by_code), and
+        hidden background-enrichment picks excluded too (see enqueue())."""
         with self._lock:
             entries = [
                 self._status_dict_locked(e)
                 for e in self._entries.values()
-                if not e.get("file") or len(Path(e["file"]).parts) == 1
+                if (not e.get("file") or len(Path(e["file"]).parts) == 1) and not e.get("hidden")
             ]
         entries.reverse()
         return entries
+
+    def list_hidden_entries(self) -> list[dict]:
+        """The mirror image of list_entries() - only the hidden background-
+        enrichment picks, most recently added first. Not used by the normal
+        Library tab; exists so the UI can offer a "show hidden" testing view."""
+        with self._lock:
+            entries = [
+                self._status_dict_locked(e)
+                for e in self._entries.values()
+                if (not e.get("file") or len(Path(e["file"]).parts) == 1) and e.get("hidden")
+            ]
+        entries.reverse()
+        return entries
+
+    def pick_random_ready(self, exclude_url: str | None = None) -> dict | None:
+        """A random "ready" song to autoplay next once the current one
+        finishes - drawn from every downloaded song, hidden ones
+        included, since the whole point of enrichment is to give
+        autoplay a bigger pool to pull from than just what the user
+        explicitly added. None if there's nothing else to play."""
+        with self._lock:
+            candidates = [
+                e
+                for url, e in self._entries.items()
+                if e.get("status") == "ready"
+                and e.get("file")
+                and len(Path(e["file"]).parts) == 1
+                and url != exclude_url
+            ]
+        return random.choice(candidates) if candidates else None
 
     def _requeue_unfinished(self) -> None:
         # Recovers the queue across a process restart - anything that
@@ -420,12 +497,52 @@ class Library:
 
     def _worker_loop(self) -> None:
         while True:
-            url = self._download_queue.get()
+            item = self._download_queue.get()
             try:
-                self._process_queued(url)
+                if item.startswith(_ENRICH_PREFIX):
+                    self._process_enrich_job(item[len(_ENRICH_PREFIX) :])
+                else:
+                    self._process_queued(item)
             except Exception as exc:  # a wedged queue is worse than a logged miss
-                print(f"[library] add-queue entry {url} raised {exc!r}")
-                self.mark_failed(url, str(exc))
+                print(f"[library] add-queue entry {item!r} raised {exc!r}")
+                if not item.startswith(_ENRICH_PREFIX):
+                    self.mark_failed(item, str(exc))
+
+    def _maybe_enrich_artist(self, artist: str) -> None:
+        """Queues a background search for a few more likely tracks by
+        `artist`, added as hidden entries (see enqueue()) - at most once
+        per artist (see _enriched_artists), so a run of several songs by
+        the same artist (e.g. its own enrichment picks finishing
+        download and triggering this again) only searches once."""
+        key = artist.strip().lower()
+        if not key or key == "unknown":
+            return
+        with self._lock:
+            if key in self._enriched_artists:
+                return
+            self._enriched_artists.add(key)
+        self._download_queue.put(f"{_ENRICH_PREFIX}{artist}")
+
+    def _process_enrich_job(self, artist: str) -> None:
+        try:
+            results = self.search(f"{artist} greatest hits", limit=8)
+        except subprocess.TimeoutExpired:
+            print(f"[library] artist enrichment search for {artist!r} timed out")
+            return
+
+        picks = [
+            r for r in results if not any(term in r["title"].lower() for term in _ENRICH_AVOID_TERMS)
+        ][:_ENRICH_PICKS]
+
+        added = 0
+        for r in picks:
+            with self._lock:
+                already_known = r["url"] in self._entries
+            if already_known:
+                continue
+            self.enqueue(r["url"], hidden=True)
+            added += 1
+        print(f"[library] artist enrichment for {artist!r} queued {added} hidden song(s)")
 
     def _process_queued(self, url: str) -> None:
         # Whether a filename/code is already claimed - the ground truth
@@ -548,6 +665,10 @@ class Library:
                 return
             if self.finalize(url, Path(lines[-1])) is None:
                 self.mark_failed(url, "download finished but couldn't finalize")
+            else:
+                artist = self.status_for_url(url).get("artist")
+                if artist:
+                    self._maybe_enrich_artist(artist)
         finally:
             with self._lock:
                 self._in_flight.discard(url)
@@ -559,7 +680,17 @@ class Library:
         title/artist from the download itself, since this flow never
         hands a code to anyone ahead of time (unlike the add-queue)."""
         with self._lock:
-            if url in self._in_flight or self.get_by_url(url) is not None:
+            # Inlined get_by_url's check rather than calling it - it
+            # takes self._lock itself, and this method is already holding
+            # it here (threading.Lock isn't reentrant; calling it would
+            # deadlock this thread against itself).
+            entry = self._entries.get(url)
+            already_ready = (
+                entry is not None
+                and entry.get("status") == "ready"
+                and (self._cache_dir / entry["file"]).exists()
+            )
+            if url in self._in_flight or already_ready:
                 return
             self._in_flight.add(url)
         try:
@@ -600,6 +731,7 @@ class Library:
                 final_path = self._cache_dir / filename
                 tmp_path.rename(final_path)
                 self._put_ready_locked(url, title, artist, final_path)
+            self._maybe_enrich_artist(artist)
         finally:
             with self._lock:
                 self._in_flight.discard(url)

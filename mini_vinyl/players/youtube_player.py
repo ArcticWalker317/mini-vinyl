@@ -51,6 +51,24 @@ A playlist (local playlist code only - see above) is shuffle-played by
 resolving its songs to on-disk paths and feeding them to
 _start_playlist_queue/_run_playlist_queue, which plays them back to back
 through `pw-play`, one track at a time.
+
+A single cached song (URL-tag cache hit or code-tag - not a playlist,
+and not a still-live mpv stream) that's left to finish playing on its own
+- tag never lifted - doesn't just go quiet: _start_autoplay_watch spawns
+a thread that waits for the process to exit, and if that was a natural
+finish rather than stop() tearing it down, picks a random "ready" song
+from the *entire* library (Library.pick_random_ready - hidden
+enrichment picks included, see library.py) and plays it the same way,
+chaining indefinitely until the tag is actually lifted. This only ever
+touches _current_url/_current_base_position/_played_since - the same
+bookkeeping a tag-driven play already updates - so lifting the tag mid
+autoplay stops things exactly like lifting it mid-anything else. The one
+place autoplay needs special handling is resume: _autoplay_active tracks
+whether the song currently playing is the tag's own or one autoplay
+picked, and stop() only records a paused position in the former case -
+otherwise a lift mid-autoplay would overwrite the tag's real resume
+point with an unrelated song's position, or worse, one that happens to
+coincide with a *different* tag's own code/URL.
 """
 
 import hashlib
@@ -91,6 +109,12 @@ class YoutubePlayer(Player):
         self._current_is_cached = False
         self._played_since: float | None = None
         self._cache_timer: threading.Timer | None = None
+
+        # True once autoplay has taken over from the tag's own song (see
+        # the module docstring) - stop() consults this to avoid recording
+        # a resume point for a song the tag doesn't actually represent.
+        self._autoplay_active = False
+        self._autoplay_stop_event: threading.Event | None = None
 
         # Playlist queue playback (cached path only - a background thread
         # feeds tracks to pw-play one at a time). Playlists never resume,
@@ -135,6 +159,7 @@ class YoutubePlayer(Player):
 
     def play(self, tag: TagEntry) -> None:
         self.stop()
+        self._autoplay_active = False
 
         resume_key = self._resolve_resume_key(tag.id)
         self._reset_stale_pause(resume_key)
@@ -204,6 +229,39 @@ class YoutubePlayer(Player):
         self._current_base_position = resume_at
         self._current_url = resume_key
         self._played_since = time.time()
+        self._start_autoplay_watch()
+
+    def _start_autoplay_watch(self) -> None:
+        stop_event = threading.Event()
+        self._autoplay_stop_event = stop_event
+        threading.Thread(
+            target=self._watch_and_autoplay, args=(self._proc, self._current_url, stop_event), daemon=True
+        ).start()
+
+    def _watch_and_autoplay(
+        self, proc: subprocess.Popen, just_played_url: str, stop_event: threading.Event
+    ) -> None:
+        proc.wait()
+        # Either check alone would mostly cover it, but both together
+        # rule out every way this thread could wake up after something
+        # else (stop(), a new tag) has already moved on: stop() always
+        # sets the event before it terminates a process, and nothing
+        # reassigns self._proc except stop() and a fresh play - which
+        # itself always goes through stop() first.
+        if stop_event.is_set() or proc is not self._proc:
+            return
+
+        next_entry = self._library.pick_random_ready(exclude_url=just_played_url)
+        if next_entry is None:
+            self._proc = None
+            self._current_url = None
+            self._current_is_cached = False
+            self._played_since = None
+            return
+
+        print(f"[youtube] autoplaying {next_entry['title']!r} (finished {just_played_url})")
+        self._autoplay_active = True
+        self._play_from_cache(next_entry["url"], next_entry, 0.0)
 
     def _maybe_start_caching(self, url: str) -> None:
         # Fires CACHE_AFTER_SECONDS after play() started; only actually
@@ -241,6 +299,14 @@ class YoutubePlayer(Player):
             self._cache_timer.cancel()
             self._cache_timer = None
 
+        if self._autoplay_stop_event is not None:
+            # Must happen before any terminate()/kill() below - the watch
+            # thread wakes up as soon as the process exits either way, and
+            # only the event tells it that exit was us stopping things
+            # rather than the song finishing on its own.
+            self._autoplay_stop_event.set()
+            self._autoplay_stop_event = None
+
         if self._current_is_playlist_queue:
             if self._playlist_stop_event is not None:
                 self._playlist_stop_event.set()
@@ -261,12 +327,18 @@ class YoutubePlayer(Player):
             return
 
         if self._proc is None:
+            self._autoplay_active = False
             return
 
         finished_naturally = self._proc.poll() is not None
 
         if not finished_naturally:
-            if self._current_is_cached and self._current_url and self._played_since is not None:
+            if (
+                self._current_is_cached
+                and self._current_url
+                and self._played_since is not None
+                and not self._autoplay_active
+            ):
                 elapsed = time.time() - self._played_since
                 self._paused_url = self._current_url
                 self._paused_position = self._current_base_position + elapsed
@@ -282,6 +354,7 @@ class YoutubePlayer(Player):
         self._current_url = None
         self._current_is_cached = False
         self._played_since = None
+        self._autoplay_active = False
 
     def _play_local_playlist(self, playlist_code: str) -> None:
         tracks = self._playlist_store.track_paths(playlist_code)

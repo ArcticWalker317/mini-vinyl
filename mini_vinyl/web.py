@@ -136,6 +136,12 @@ def create_app(library: Library, playlist_store: PlaylistStore, write_coordinato
     def list_library():
         return {"entries": library.list_entries()}
 
+    @app.get("/api/library/hidden")
+    def list_hidden_library():
+        # Testing-only view of the background-enrichment picks that the
+        # normal Library tab deliberately excludes (see Library.enqueue()).
+        return {"entries": library.list_hidden_entries()}
+
     @app.get("/api/songs/<code>/status")
     def song_status(code: str):
         return library.status_for_code(code)

@@ -186,6 +186,30 @@ song can take the better part of a minute or more to actually start
 downloading - it's genuinely a "queue it and come back later" thing, not
 an instant one.
 
+### Autoplay and background discovery
+
+Once a song reaches **Ready**, the Pi quietly searches for a few more
+likely tracks by the same artist and downloads those in the background
+too - real, playable songs, just not shown in **Your library**, so
+adding one song doesn't flood the list with things you didn't ask for.
+If you later add one of those same songs yourself by name, it shows up
+in the library at that point instead of downloading a duplicate.
+
+The payoff: when a tag's song finishes playing and the tag is still on
+the reader, the Pi doesn't just go quiet - it picks a random "ready" song
+from everywhere in the catalog (including those quiet background picks)
+and keeps playing, chaining to another random song each time one ends,
+for as long as the tag stays put. Lifting the tag stops it, same as
+always; retapping the original tag later resumes from where *it* left
+off, not wherever autoplay had wandered off to. This only applies to a
+single song's tag (not a playlist tag, which keeps its own fixed
+shuffle-through-once behavior) and only once it's actually playing from
+the downloaded file, not while still streaming live.
+
+There's no cap on how much this can download over time - it's meant to
+grow your library organically the more you use it, not stay a fixed
+size.
+
 ### Building playlists
 
 You can build your own playlists out of songs you've already downloaded -
@@ -289,9 +313,15 @@ or speaker address differ from the placeholders.
   fetching its info, claiming a unique `<song_title>-<artist>.wav`
   filename/code, then downloading - since running more than one
   `yt-dlp`/`ffmpeg` process at once wouldn't actually go any faster on a
-  Pi Zero W's single weak core, just contend for it. `Library` is shared
-  between `YoutubePlayer` and `web.py` so both read and write the same
-  in-memory catalog with no cross-process locking needed.
+  Pi Zero W's single weak core, just contend for it. Once a song reaches
+  "ready", `_maybe_enrich_artist` queues a background search for a few
+  more tracks by the same artist onto that same worker/queue (never a
+  second concurrent `yt-dlp` process) and adds them with `hidden: true` -
+  real catalog entries, just excluded from `list_entries()` (what the web
+  UI's Library tab shows) and only ever un-hidden if the user later adds
+  one by name through the normal path. `Library` is shared between
+  `YoutubePlayer` and `web.py` so both read and write the same in-memory
+  catalog with no cross-process locking needed.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
   `yt-dlp` under the hood) and plays audio out through PipeWire, which
   owns the Bluetooth speaker's A2DP sink. A tag's content is a raw
@@ -301,11 +331,17 @@ or speaker address differ from the placeholders.
   and if it's still playing after a few seconds, a background download
   starts too - later plays of that tag (or of a code-tag, once its
   download has finished) find the cached file and start instantly via
-  `pw-play`, with no live resolution involved. A playlist code has no
-  live/caching phase at all - it's always shuffle-played by resolving its
-  songs to on-disk paths and feeding them through the same queue
-  mechanism, one track at a time, since every song in it is already a
-  "ready" download by construction.
+  `pw-play`, with no live resolution involved. Once a cached single song
+  finishes playing on its own (tag never lifted), `_watch_and_autoplay`
+  picks a random "ready" song from the whole catalog (`Library.
+  pick_random_ready`, hidden picks included) and plays it the same way,
+  chaining for as long as the tag stays present; `_autoplay_active`
+  tracks whether the current song is an autoplay pick so a lift mid
+  autoplay doesn't record a resume point under the tag's real code/URL.
+  A playlist code has no live/caching or autoplay-chaining phase at all -
+  it's always shuffle-played by resolving its songs to on-disk paths and
+  feeding them through the same queue mechanism, one track at a time,
+  since every song in it is already a "ready" download by construction.
 - `mini_vinyl/playlists.py`'s `PlaylistStore` owns locally-built
   playlists (`playlists.json`, alongside `library.json`) - just an
   ordered list of song codes per playlist, resolved to on-disk paths

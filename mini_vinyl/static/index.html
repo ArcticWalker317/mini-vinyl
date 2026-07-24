@@ -160,10 +160,17 @@
     margin-top: 0.5rem;
     min-height: 1.2em;
   }
-  #library-empty, #playlists-empty, #playlist-songs-empty {
+  #library-empty, #playlists-empty, #playlist-songs-empty, #library-hidden-empty {
     color: var(--muted);
     font-size: 0.9rem;
   }
+  .screen-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .screen-header h1 { margin: 0.5rem 0 1rem; }
   #playlists-status {
     color: var(--err);
     font-size: 0.9rem;
@@ -264,9 +271,18 @@
 
   <section class="screen" id="screen-library" hidden>
     <button type="button" class="back" id="back-from-library">&larr; Back</button>
-    <h1>Your Library</h1>
+    <div class="screen-header">
+      <h1>Your Library</h1>
+      <button type="button" class="small secondary" id="toggle-hidden">Show hidden</button>
+    </div>
     <div id="library-empty">Nothing added yet.</div>
     <ul class="list" id="library"></ul>
+
+    <div id="library-hidden-section" hidden>
+      <h2 class="section">Hidden (background enrichment picks)</h2>
+      <div id="library-hidden-empty">No hidden songs yet.</div>
+      <ul class="list" id="library-hidden"></ul>
+    </div>
   </section>
 
   <section class="screen" id="screen-playlists" hidden>
@@ -328,6 +344,11 @@
 const statusMsgEl = document.getElementById("status-msg");
 const libraryEl = document.getElementById("library");
 const libraryEmptyEl = document.getElementById("library-empty");
+const libraryHiddenSectionEl = document.getElementById("library-hidden-section");
+const libraryHiddenEl = document.getElementById("library-hidden");
+const libraryHiddenEmptyEl = document.getElementById("library-hidden-empty");
+const toggleHiddenBtn = document.getElementById("toggle-hidden");
+let showHidden = false;
 const playlistsListEl = document.getElementById("playlists-list");
 const playlistsEmptyEl = document.getElementById("playlists-empty");
 const playlistsStatusEl = document.getElementById("playlists-status");
@@ -466,6 +487,32 @@ async function refreshLibrary() {
   libraryEmptyEl.hidden = data.entries.length > 0;
   for (const entry of data.entries) {
     libraryEl.appendChild(renderLibraryEntry(entry));
+  }
+
+  refreshHiddenLibrary();
+}
+
+toggleHiddenBtn.addEventListener("click", () => {
+  showHidden = !showHidden;
+  toggleHiddenBtn.textContent = showHidden ? "Hide hidden" : "Show hidden";
+  libraryHiddenSectionEl.hidden = !showHidden;
+  if (showHidden) refreshHiddenLibrary();
+});
+
+async function refreshHiddenLibrary() {
+  if (!showHidden) return;
+  let data;
+  try {
+    const res = await fetch("/api/library/hidden");
+    data = await res.json();
+  } catch (err) {
+    return; // transient network hiccup - next poll will retry
+  }
+
+  libraryHiddenEl.innerHTML = "";
+  libraryHiddenEmptyEl.hidden = data.entries.length > 0;
+  for (const entry of data.entries) {
+    libraryHiddenEl.appendChild(renderLibraryEntry(entry));
   }
 }
 
