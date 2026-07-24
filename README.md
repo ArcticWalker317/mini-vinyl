@@ -209,9 +209,6 @@ otherwise need a terminal for:
   signal strength, and IP address (the same IP the mDNS fallback in
   [Adding songs from your phone](#adding-songs-from-your-phone) refers
   to). There's no way to switch networks from here.
-- **Volume** - a slider controlling the system volume (PipeWire's
-  default audio sink - whatever's currently playing audio, i.e. the
-  connected Bluetooth speaker), plus a Mute toggle.
 - **Bluetooth** - lists paired devices with **Connect**/**Disconnect**
   per device, and a **Scan for devices** button that discovers nearby
   unpaired devices for about 10 seconds and offers a **Pair** button for
@@ -221,10 +218,13 @@ otherwise need a terminal for:
   a passkey/numeric-comparison step can't be paired from this page - use
   [Bluetooth pairing](#bluetooth-pairing) instead.
 
-This all works by shelling out to `bluetoothctl`, `nmcli`, and `wpctl`
-directly (`mini_vinyl/bluetooth.py`, `network.py`, `audio.py`) - nothing
-here is state the app keeps track of itself, it's just a live view onto
-what BlueZ/NetworkManager/PipeWire already report.
+This all works by shelling out to `bluetoothctl` and `nmcli` directly
+(`mini_vinyl/bluetooth.py`, `network.py`) - nothing here is state the app
+keeps track of itself, it's just a live view onto what BlueZ/
+NetworkManager already report. There's no volume control here - a web
+slider proved too laggy for a per-drag round trip to a `wpctl` process,
+so that's planned as a physical control on the Pi instead
+(`mini_vinyl/audio.py` still has the `wpctl` wrapper ready for it).
 
 ### Run it
 

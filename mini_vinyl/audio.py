@@ -1,8 +1,13 @@
-"""Volume control for the web UI's Settings page, via PipeWire's `wpctl`
-(already this project's audio toolchain - see AUDIO_OUTPUT/players/
-youtube_player.py) against the default audio sink, i.e. whatever's
-currently the active PipeWire output - the paired Bluetooth speaker,
-once connected.
+"""Volume control via PipeWire's `wpctl` (already this project's audio
+toolchain - see AUDIO_OUTPUT/players/youtube_player.py) against the
+default audio sink, i.e. whatever's currently the active PipeWire
+output - the paired Bluetooth speaker, once connected.
+
+Not currently wired into anything - a web UI slider was tried and cut
+for being too laggy (a full HTTP round trip plus a `wpctl` subprocess
+call per drag movement isn't a good fit for "smooth slider" UX). Kept
+around for a planned physical volume control on the Pi itself, which
+these functions should work unchanged for.
 """
 
 import re

@@ -190,7 +190,12 @@ class Library:
 
     # ---- web "Add" flow ----
 
-    def search(self, query: str, limit: int = 15) -> list[dict]:
+    def search(self, query: str, limit: int = 3) -> list[dict]:
+        # A search on this hardware is bottlenecked by yt-dlp actually
+        # fetching+parsing YouTube's search response, not by anything on
+        # our end - asking for fewer results genuinely cuts that time
+        # rather than just trimming what gets displayed. 3 comfortably
+        # covers the common case of the right video being an early result.
         proc = subprocess.run(
             [
                 "yt-dlp",

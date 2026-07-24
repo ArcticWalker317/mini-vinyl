@@ -16,10 +16,13 @@ to a tag reuses the exact same /api/write flow as a song; a playlist's
 code just carries the "playlist:" prefix PlaylistStore/YoutubePlayer use
 to tell the two apart.
 
-/api/settings/* is a thin HTTP wrapper around mini_vinyl/bluetooth.py,
-network.py, and audio.py - each just shells out to a system tool
-(bluetoothctl, nmcli, wpctl) and reflects its live state back; nothing
-here is state this project owns or persists itself.
+/api/settings/* is a thin HTTP wrapper around mini_vinyl/bluetooth.py and
+network.py - each just shells out to a system tool (bluetoothctl, nmcli)
+and reflects its live state back; nothing here is state this project
+owns or persists itself. Volume isn't exposed here - a web slider proved
+too laggy for the round trip to a `wpctl` subprocess call; it's a
+physical control on the Pi instead. mini_vinyl/audio.py still has the
+`wpctl` wrapper for whenever that gets built - nothing here calls it yet.
 """
 
 import logging
@@ -27,7 +30,6 @@ import subprocess
 
 from flask import Flask, request, send_from_directory
 
-from mini_vinyl import audio
 from mini_vinyl import bluetooth as bt
 from mini_vinyl import network as net
 from mini_vinyl.library import Library
@@ -45,7 +47,6 @@ _QUIET_PATHS = (
     "/api/write/status",
     "/api/library",
     "/api/settings/wifi",
-    "/api/settings/volume",
     "/api/settings/bluetooth/devices",
     "/favicon.ico",
     "/apple-touch-icon.png",
@@ -212,27 +213,6 @@ def create_app(library: Library, playlist_store: PlaylistStore, write_coordinato
     @app.get("/api/settings/wifi")
     def wifi_status():
         return net.wifi_status()
-
-    @app.get("/api/settings/volume")
-    def get_volume():
-        return audio.get_volume()
-
-    @app.post("/api/settings/volume")
-    def set_volume():
-        data = request.get_json(silent=True) or {}
-        level = data.get("level")
-        if not isinstance(level, (int, float)):
-            return {"error": "level is required"}, 400
-        if not audio.set_volume(int(level)):
-            return {"error": "couldn't set volume"}, 502
-        return audio.get_volume()
-
-    @app.post("/api/settings/mute")
-    def set_mute():
-        data = request.get_json(silent=True) or {}
-        if not audio.set_mute(bool(data.get("muted"))):
-            return {"error": "couldn't set mute"}, 502
-        return audio.get_volume()
 
     @app.get("/api/settings/bluetooth/devices")
     def bluetooth_devices():

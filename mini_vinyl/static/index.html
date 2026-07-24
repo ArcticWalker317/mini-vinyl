@@ -191,21 +191,6 @@
   #bluetooth-scan {
     margin-top: 1rem;
   }
-  .volume-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin: 0.5rem 0 1rem;
-  }
-  .volume-row input[type="range"] {
-    flex: 1;
-  }
-  #volume-label {
-    width: 3.5rem;
-    text-align: right;
-    color: var(--muted);
-    font-size: 0.9rem;
-  }
   .overlay {
     position: fixed;
     inset: 0;
@@ -322,13 +307,6 @@
     <h2 class="section">Wi-Fi</h2>
     <div id="wifi-status">Loading…</div>
 
-    <h2 class="section">Volume</h2>
-    <div class="volume-row">
-      <input type="range" id="volume-slider" min="0" max="100" value="0">
-      <span id="volume-label">--%</span>
-    </div>
-    <button type="button" class="secondary small" id="mute-toggle">Mute</button>
-
     <h2 class="section">Bluetooth</h2>
     <div id="bluetooth-paired-empty">No paired devices.</div>
     <ul class="list" id="bluetooth-paired"></ul>
@@ -370,9 +348,6 @@ const playlistSongSearchEl = document.getElementById("playlist-song-search");
 const playlistSongResultsEl = document.getElementById("playlist-song-results");
 const writePlaylistBtn = document.getElementById("write-playlist");
 const wifiStatusEl = document.getElementById("wifi-status");
-const volumeSliderEl = document.getElementById("volume-slider");
-const volumeLabelEl = document.getElementById("volume-label");
-const muteToggleBtn = document.getElementById("mute-toggle");
 const bluetoothPairedEl = document.getElementById("bluetooth-paired");
 const bluetoothPairedEmptyEl = document.getElementById("bluetooth-paired-empty");
 const bluetoothScanBtn = document.getElementById("bluetooth-scan");
@@ -769,7 +744,6 @@ writePlaylistBtn.addEventListener("click", () => {
 
 function refreshSettings() {
   refreshWifiStatus();
-  refreshVolume();
   refreshBluetoothPaired();
 }
 
@@ -788,47 +762,6 @@ async function refreshWifiStatus() {
     wifiStatusEl.textContent = "Couldn't reach the Pi.";
   }
 }
-
-async function refreshVolume() {
-  try {
-    const res = await fetch("/api/settings/volume");
-    const data = await res.json();
-    if (data.level === null || data.level === undefined) {
-      volumeLabelEl.textContent = "--%";
-      return;
-    }
-    // Don't stomp on the slider while the user's actively dragging it.
-    if (document.activeElement !== volumeSliderEl) {
-      volumeSliderEl.value = data.level;
-    }
-    volumeLabelEl.textContent = `${volumeSliderEl.value}%`;
-    muteToggleBtn.textContent = data.muted ? "Unmute" : "Mute";
-  } catch (err) {
-    // transient network hiccup - next poll will retry
-  }
-}
-
-volumeSliderEl.addEventListener("input", () => {
-  volumeLabelEl.textContent = `${volumeSliderEl.value}%`;
-});
-
-volumeSliderEl.addEventListener("change", () => {
-  fetch("/api/settings/volume", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ level: parseInt(volumeSliderEl.value, 10) }),
-  });
-});
-
-muteToggleBtn.addEventListener("click", async () => {
-  const currentlyMuted = muteToggleBtn.textContent === "Unmute";
-  await fetch("/api/settings/mute", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ muted: !currentlyMuted }),
-  });
-  refreshVolume();
-});
 
 async function refreshBluetoothPaired() {
   let data;
