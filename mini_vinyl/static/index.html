@@ -84,8 +84,9 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  form#search-form {
+  form#add-song-form {
     display: flex;
+    flex-direction: column;
     gap: 0.5rem;
   }
   input[type="text"] {
@@ -253,19 +254,12 @@
   <section class="screen" id="screen-add" hidden>
     <button type="button" class="back" id="back-from-add">&larr; Back</button>
     <h1>Add Songs</h1>
-    <form id="search-form">
-      <input type="text" id="query" placeholder="Search for a song..." autocomplete="off">
-      <button type="submit">Search</button>
+    <form id="add-song-form">
+      <input type="text" id="song-title" placeholder="Song title" autocomplete="off">
+      <input type="text" id="song-artist" placeholder="Artist (optional)" autocomplete="off">
+      <button type="submit" class="wide">Add</button>
     </form>
     <div id="status-msg"></div>
-    <div id="already-downloaded-section" hidden>
-      <h2 class="section">Already downloaded songs</h2>
-      <ul class="list" id="already-downloaded"></ul>
-    </div>
-    <div id="to-add-section" hidden>
-      <h2 class="section">Add:</h2>
-      <ul class="list" id="results"></ul>
-    </div>
   </section>
 
   <section class="screen" id="screen-library" hidden>
@@ -331,11 +325,7 @@
 </div>
 
 <script>
-const resultsEl = document.getElementById("results");
 const statusMsgEl = document.getElementById("status-msg");
-const alreadyDownloadedSectionEl = document.getElementById("already-downloaded-section");
-const alreadyDownloadedEl = document.getElementById("already-downloaded");
-const toAddSectionEl = document.getElementById("to-add-section");
 const libraryEl = document.getElementById("library");
 const libraryEmptyEl = document.getElementById("library-empty");
 const playlistsListEl = document.getElementById("playlists-list");
@@ -414,90 +404,53 @@ document.getElementById("back-from-settings").addEventListener("click", () => {
   showScreen("screen-home");
 });
 
-document.getElementById("search-form").addEventListener("submit", async (e) => {
+document.getElementById("add-song-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const query = document.getElementById("query").value.trim();
-  if (!query) return;
+  const titleInput = document.getElementById("song-title");
+  const artistInput = document.getElementById("song-artist");
+  const title = titleInput.value.trim();
+  const artist = artistInput.value.trim();
+  if (!title) return;
 
-  statusMsgEl.textContent = "Searching...";
-  resultsEl.innerHTML = "";
-  alreadyDownloadedEl.innerHTML = "";
-  alreadyDownloadedSectionEl.hidden = true;
-  toAddSectionEl.hidden = true;
+  const label = artist ? `"${title}" by ${artist}` : `"${title}"`;
+  statusMsgEl.textContent = `Looking for ${label}…`;
+  titleInput.value = "";
+  artistInput.value = "";
 
   try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+    const res = await fetch("/api/songs/find", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, artist }),
+    });
     const data = await res.json();
     if (data.error) {
       statusMsgEl.textContent = data.error;
       return;
     }
-    statusMsgEl.textContent = data.results.length ? "" : "No results.";
-
-    const alreadyDownloaded = data.results.filter((r) => r.code);
-    const toAdd = data.results.filter((r) => !r.code);
-
-    for (const r of alreadyDownloaded) {
-      alreadyDownloadedEl.appendChild(renderAlreadyDownloaded(r));
-    }
-    alreadyDownloadedSectionEl.hidden = alreadyDownloaded.length === 0;
-
-    for (const r of toAdd) {
-      resultsEl.appendChild(renderResult(r));
-    }
-    toAddSectionEl.hidden = toAdd.length === 0;
+    pollFindStatus(data.job_id, label);
   } catch (err) {
-    statusMsgEl.textContent = "Search failed - is the Pi reachable?";
+    statusMsgEl.textContent = "Couldn't reach the Pi.";
   }
 });
 
-function renderAlreadyDownloaded(r) {
-  const li = document.createElement("li");
-  li.className = "item";
-  li.innerHTML = `
-    <div class="item-text">
-      <div class="item-title"></div>
-      <div class="item-sub"></div>
-    </div>
-    <button type="button" class="small">Write tag</button>
-  `;
-  li.querySelector(".item-title").textContent = r.title;
-  li.querySelector(".item-sub").textContent = r.uploader;
-  li.querySelector("button").addEventListener("click", () => openWriteModal(r.code));
-  return li;
-}
-
-function renderResult(r) {
-  const li = document.createElement("li");
-  li.className = "item";
-  li.innerHTML = `
-    <div class="item-text">
-      <div class="item-title"></div>
-      <div class="item-sub"></div>
-    </div>
-    <button type="button" class="small">Add</button>
-  `;
-  li.querySelector(".item-title").textContent = r.title;
-  li.querySelector(".item-sub").textContent = r.uploader;
-  const btn = li.querySelector("button");
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    btn.textContent = "Adding…";
+function pollFindStatus(jobId, label) {
+  const handle = setInterval(async () => {
     try {
-      await fetch("/api/songs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: r.url }),
-      });
-      btn.textContent = "Queued ✓";
-      refreshLibrary();
+      const res = await fetch(`/api/songs/find/${encodeURIComponent(jobId)}/status`);
+      const data = await res.json();
+      if (data.status === "searching") return;
+
+      clearInterval(handle);
+      if (data.status === "found") {
+        statusMsgEl.textContent = `Added ${label} - downloading in the background. Check Your Library for progress.`;
+      } else {
+        statusMsgEl.textContent = `Couldn't add ${label}${data.detail ? ": " + data.detail : ""}.`;
+      }
     } catch (err) {
-      btn.disabled = false;
-      btn.textContent = "Add";
-      statusMsgEl.textContent = "Couldn't reach the Pi.";
+      // transient network hiccup - next poll will retry
     }
-  });
-  return li;
+  }, 1500);
 }
 
 async function refreshLibrary() {

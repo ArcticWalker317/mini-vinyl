@@ -13,12 +13,13 @@ catalog alongside the audio files, with each entry's title, artist, and
 source YouTube link.
 
 There's also a phone-facing web UI for adding songs without manually
-copying URLs: search YouTube from your phone's browser, tap Add, and the
-Pi starts downloading it while handing back a short code (e.g.
-`the_scientist-coldplay` - literally the filename above, minus `.wav`).
-Place a blank tag on the Pi's own reader and it burns that code straight
-onto the tag - no separate NFC-writer app needed for these. See
-[Adding songs from your phone](#adding-songs-from-your-phone) below. The
+copying URLs: type a song title (and artist) from your phone's browser,
+tap Add, and the Pi finds the best-matching YouTube video and starts
+downloading it, handing back a short code (e.g. `the_scientist-coldplay`
+- literally the filename above, minus `.wav`). Place a blank tag on the
+Pi's own reader and it burns that code straight onto the tag - no
+separate NFC-writer app needed for these. See [Adding songs from your
+phone](#adding-songs-from-your-phone) below. The
 same web UI is also the only way to build a **playlist** tag - a
 hand-picked, shuffle-played set of songs you've already downloaded; see
 [Building playlists](#building-playlists).
@@ -153,13 +154,16 @@ http://<hostname>.local:8080
 Options -> Hostname, e.g. `mini-vinyl.local`. Run `hostname` on the Pi if
 you're not sure what it's currently set to.)
 
-Search for a song and tap **Add** - it's queued instantly, so you can
-search and add a whole stack of songs back to back (or across several
-searches) without waiting on any of them. The Pi works through the queue
-one song at a time in the background - fetching its info, then
-downloading it - entirely on its own, so it's fine to close the page or
-turn your phone off once everything you want is queued; it'll all still
-be there, further along, whenever you check back.
+Type a **song title** (and, optionally, an **artist** - recommended when
+the title alone is ambiguous) and tap **Add**. There's no results list to
+browse - the Pi searches YouTube, picks the best-looking match itself,
+and starts downloading it, all in the background; the button returns
+instantly, so you can add a whole stack of songs back to back without
+waiting on any of them, close the page, or turn your phone off. Picking
+the match prefers titles containing "Official" or "Remastered"/
+"Remaster", and deprioritizes (but doesn't rule out) ones containing
+"Lyrics" or "Karaoke," which are usually lyric/karaoke videos rather than
+the actual track.
 
 The **Your library** section on the same page lists everything you've
 added and its current status (queued / fetching info / downloading /
@@ -176,11 +180,12 @@ Only single videos can be added this way - there's no way to add a
 YouTube playlist through this flow; build a playlist from
 already-downloaded songs instead (see [Building
 playlists](#building-playlists)). No auth, no HTTPS - this is meant for a
-trusted home network only, not for exposing beyond it. Fetching a song's
-info (needed before it can even be queued for download) can itself take
-the better part of a minute per song on this hardware, so a big batch add
-is genuinely a "queue it and come back later" operation, not an
-instant one.
+trusted home network only, not for exposing beyond it. Both the search
+and the metadata fetch that follows a match happen on this hardware's
+weak single core, so even though the button itself responds instantly, a
+song can take the better part of a minute or more to actually start
+downloading - it's genuinely a "queue it and come back later" thing, not
+an instant one.
 
 ### Building playlists
 
@@ -274,15 +279,20 @@ or speaker address differ from the placeholders.
   (`library.json`) and all downloading: looking up a cached file by URL or
   by code, and running the actual `yt-dlp` downloads (for a
   tapped-and-cached URL-tag or the web UI's Add flow) in the background.
-  The web UI's Add flow (`enqueue()`) just records a url and returns
-  immediately; a single persistent background worker thread drains that
-  queue one song at a time - fetching its info, claiming a unique
-  `<song_title>-<artist>.wav` filename/code, then downloading - since
-  running more than one `yt-dlp`/`ffmpeg` process at once wouldn't
-  actually go any faster on a Pi Zero W's single weak core, just contend
-  for it. `Library` is shared between `YoutubePlayer` and `web.py` so
-  both read and write the same in-memory catalog with no cross-process
-  locking needed.
+  The web UI's Add flow starts with a title/artist, not a URL -
+  `enqueue_search()` puts that on its own background worker/queue, which
+  runs a fast flat YouTube search, scores the results (`_pick_best_match`
+  - rewarding "Official"/"Remastered" in the title, penalizing "Lyrics"/
+  "Karaoke"), and hands the winning URL to `enqueue()`, the same entry
+  point a tapped-and-cached URL-tag uses. `enqueue()` itself just records
+  the url and returns immediately; a single persistent background worker
+  thread drains that (separate) download queue one song at a time -
+  fetching its info, claiming a unique `<song_title>-<artist>.wav`
+  filename/code, then downloading - since running more than one
+  `yt-dlp`/`ffmpeg` process at once wouldn't actually go any faster on a
+  Pi Zero W's single weak core, just contend for it. `Library` is shared
+  between `YoutubePlayer` and `web.py` so both read and write the same
+  in-memory catalog with no cross-process locking needed.
 - `mini_vinyl/players/youtube_player.py` shells out to `mpv` (which uses
   `yt-dlp` under the hood) and plays audio out through PipeWire, which
   owns the Bluetooth speaker's A2DP sink. A tag's content is a raw

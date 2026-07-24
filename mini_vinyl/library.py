@@ -31,6 +31,17 @@ A failed download's reservation (once one exists) is never freed for
 reuse - once a code might be sitting on a physical tag, that filename is
 permanently spoken for, download or no download; a retry just resumes
 from the download step rather than re-probing or re-slugifying.
+
+Adding a song only ever needs a title (and, optionally, an artist) from
+the web UI - see enqueue_search(). A YouTube search + pick-the-best-match
+step (_pick_best_match) resolves that to an actual video before handing
+off to the same enqueue()/download pipeline used everywhere else. That
+resolution runs on its own background worker/queue, entirely separate
+from the download queue and not persisted to library.json - a search
+job is cheap to just redo if it's lost on a restart, unlike a download
+that's already claimed a filename, so it doesn't need the same
+durability. The web UI polls search_job_status() to find out what a
+search resolved to (if anything).
 """
 
 import json
@@ -54,12 +65,57 @@ _SEP = "\x1f"
 _MAX_TITLE_SLUG_LEN = 40
 _MAX_ARTIST_SLUG_LEN = 30
 
+# Soft ranking signals for picking the best search result for a
+# title/artist search - not hard filters, since a "Lyrics" video that's
+# otherwise the only real match should still win over nothing. Matched
+# against the candidate's title, case-insensitively. "remaster" (not
+# "remastered") deliberately covers remaster/remastered/remasters as one
+# substring match - listing both would double-count a title containing
+# "Remastered", over-weighting it relative to "Official".
+_PREFERRED_TERMS = {"official": 3, "remaster": 2}
+_DEPRIORITIZED_TERMS = {"lyrics": 4, "lyric video": 4, "karaoke": 4}
+
 
 def _slugify(text: str, max_len: int | None = None) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower()).strip("_")
     if max_len is not None:
         slug = slug[:max_len].rstrip("_")
     return slug or "unknown"
+
+
+def _match_score(result: dict, title: str, artist: str) -> int:
+    text = result["title"].lower()
+    uploader = (result.get("uploader") or "").lower()
+
+    # Word-set intersection, not substring containment - "the" in title
+    # words must match the whole word "the" in the candidate's title, not
+    # just appear as a substring of an unrelated word like "other".
+    text_words = set(re.findall(r"\w+", text))
+    uploader_words = set(re.findall(r"\w+", uploader))
+    title_words = set(re.findall(r"\w+", title.lower()))
+    artist_words = set(re.findall(r"\w+", artist.lower()))
+
+    score = 2 * len(title_words & text_words)
+    score += len(artist_words & (text_words | uploader_words))
+
+    for term, weight in _PREFERRED_TERMS.items():
+        if term in text:
+            score += weight
+    for term, weight in _DEPRIORITIZED_TERMS.items():
+        if term in text:
+            score -= weight
+
+    return score
+
+
+def _pick_best_match(results: list[dict], title: str, artist: str) -> dict:
+    """The highest-scoring candidate for `title`/`artist` - relevance
+    (title/artist words actually present) dominates the score, with
+    "official"/"remaster(ed)" nudging it up and "lyrics"/"karaoke"
+    nudging it down among otherwise-similar candidates. Ties keep
+    YouTube's own search ordering (max() returns the first of equal
+    candidates, and `results` arrives in that order)."""
+    return max(results, key=lambda r: _match_score(r, title, artist))
 
 
 def _pick_artist(info: dict) -> str:
@@ -92,6 +148,15 @@ class Library:
         self._download_queue: queue.Queue[str] = queue.Queue()
         threading.Thread(target=self._worker_loop, daemon=True).start()
         self._requeue_unfinished()
+
+        # Title/artist -> best-matching video resolution, entirely
+        # separate from the download queue above and never persisted
+        # (see the module docstring) - its own worker so a search in
+        # flight can't get stuck behind - or block - a download, or vice
+        # versa.
+        self._search_jobs: dict[str, dict] = {}
+        self._search_queue: queue.Queue[str] = queue.Queue()
+        threading.Thread(target=self._search_worker_loop, daemon=True).start()
 
     @property
     def cache_dir(self) -> Path:
@@ -181,21 +246,15 @@ class Library:
     def path_for(self, entry: dict) -> Path:
         return self._cache_dir / entry["file"]
 
-    def code_for_url(self, url: str) -> str | None:
-        """The code for `url` if it's already been fully downloaded, else
-        None - used to flag already-downloaded search results before the
-        user re-adds something they've already got."""
-        entry = self.get_by_url(url)
-        return _code_of(entry) if entry else None
-
     # ---- web "Add" flow ----
 
-    def search(self, query: str, limit: int = 3) -> list[dict]:
-        # A search on this hardware is bottlenecked by yt-dlp actually
-        # fetching+parsing YouTube's search response, not by anything on
-        # our end - asking for fewer results genuinely cuts that time
-        # rather than just trimming what gets displayed. 3 comfortably
-        # covers the common case of the right video being an early result.
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """Flat (fast) search - a candidate pool for _pick_best_match to
+        choose from, not something shown to the user directly. A search
+        on this hardware is bottlenecked by yt-dlp actually
+        fetching+parsing YouTube's search response, not by anything on
+        our end, so asking for fewer results genuinely cuts the time this
+        takes rather than just trimming a displayed list."""
         proc = subprocess.run(
             [
                 "yt-dlp",
@@ -247,6 +306,67 @@ class Library:
             raise RuntimeError(proc.stderr.strip()[-500:] or "yt-dlp probe failed")
         info = json.loads(proc.stdout.strip().splitlines()[-1])
         return {"title": info.get("title") or url, "artist": _pick_artist(info)}
+
+    def enqueue_search(self, title: str, artist: str) -> str:
+        """Kicks off a background search for the best-matching video for
+        `title`/`artist`; returns a job id immediately (search_job_status()
+        polls it) without waiting on the search itself, let alone a
+        download - the whole thing (search, pick, then the normal
+        enqueue()/download pipeline) runs on _search_worker_loop."""
+        job_id = uuid4().hex
+        with self._lock:
+            self._search_jobs[job_id] = {
+                "status": "searching",
+                "title": title,
+                "artist": artist,
+                "code": None,
+                "detail": "",
+            }
+        self._search_queue.put(job_id)
+        return job_id
+
+    def search_job_status(self, job_id: str) -> dict:
+        with self._lock:
+            job = self._search_jobs.get(job_id)
+            return dict(job) if job is not None else {"status": "unknown"}
+
+    def _resolve_search_job(
+        self, job_id: str, status: str, *, code: str | None = None, detail: str = ""
+    ) -> None:
+        with self._lock:
+            job = self._search_jobs.get(job_id)
+            if job is not None:
+                job["status"] = status
+                job["code"] = code
+                job["detail"] = detail
+
+    def _search_worker_loop(self) -> None:
+        while True:
+            job_id = self._search_queue.get()
+            try:
+                self._process_search_job(job_id)
+            except Exception as exc:  # a wedged queue is worse than a logged miss
+                print(f"[library] search job {job_id} raised {exc!r}")
+                self._resolve_search_job(job_id, "failed", detail=str(exc))
+
+    def _process_search_job(self, job_id: str) -> None:
+        job = self.search_job_status(job_id)
+        title, artist = job.get("title", ""), job.get("artist", "")
+        query = f"{title} {artist}".strip()
+
+        try:
+            results = self.search(query, limit=5)
+        except subprocess.TimeoutExpired:
+            self._resolve_search_job(job_id, "failed", detail="search timed out")
+            return
+
+        if not results:
+            self._resolve_search_job(job_id, "failed", detail="no matching videos found")
+            return
+
+        best = _pick_best_match(results, title, artist)
+        status = self.enqueue(best["url"])  # idempotent - reuses an existing entry if there is one
+        self._resolve_search_job(job_id, "found", code=status["code"])
 
     def enqueue(self, url: str) -> dict:
         """Adds `url` to the add-queue if it isn't already known, or - if

@@ -4,11 +4,13 @@ in-memory Library/WriteCoordinator with no cross-process locking needed.
 No auth - meant for a trusted home LAN only, reached via mDNS
 (http://<hostname>.local:8080), never exposed beyond it.
 
-Adding a song only ever enqueues it (see Library.enqueue) - the actual
-probing/downloading happens later on Library's own background worker, so
-a burst of Adds returns instantly no matter how many songs are queued up,
-and finishes on its own even if nobody's watching. /api/library is how
-the frontend finds out what's ready to have a tag written for it.
+Adding a song takes just a title (and optionally an artist) and never
+blocks on anything - /api/songs/find kicks off a background search +
+best-match pick + download (see Library.enqueue_search), returning a job
+id immediately; /api/songs/find/<id>/status polls it. A burst of Adds
+returns instantly no matter how many are queued up, and finishes on its
+own even if nobody's watching. /api/library is how the frontend finds
+out what's ready to have a tag written for it.
 
 /api/playlists/* manages locally-built playlists (mini_vinyl/playlists.py's
 PlaylistStore) - hand-picked sets of already-downloaded songs. Writing one
@@ -26,7 +28,6 @@ physical control on the Pi instead. mini_vinyl/audio.py still has the
 """
 
 import logging
-import subprocess
 
 from flask import Flask, request, send_from_directory
 
@@ -46,6 +47,7 @@ from mini_vinyl.tag_writer import WriteCoordinator
 _QUIET_PATHS = (
     "/api/write/status",
     "/api/library",
+    "/api/songs/find/",
     "/api/settings/wifi",
     "/api/settings/bluetooth/devices",
     "/favicon.ico",
@@ -105,21 +107,25 @@ def create_app(library: Library, playlist_store: PlaylistStore, write_coordinato
     def index():
         return send_from_directory(app.static_folder, "index.html")
 
-    @app.get("/api/search")
-    def search():
-        query = (request.args.get("q") or "").strip()
-        if not query:
-            return {"results": []}
-        try:
-            results = library.search(query)
-        except subprocess.TimeoutExpired:
-            return {"error": "search timed out"}, 504
-        for r in results:
-            r["code"] = library.code_for_url(r["url"])
-        return {"results": results}
+    @app.post("/api/songs/find")
+    def find_song():
+        data = request.get_json(silent=True) or {}
+        title = (data.get("title") or "").strip()
+        artist = (data.get("artist") or "").strip()
+        if not title:
+            return {"error": "title is required"}, 400
+        job_id = library.enqueue_search(title, artist)
+        return {"job_id": job_id, "status": "searching"}
+
+    @app.get("/api/songs/find/<job_id>/status")
+    def find_song_status(job_id: str):
+        return library.search_job_status(job_id)
 
     @app.post("/api/songs")
     def add_song():
+        # Used to retry a failed download (see the Library screen's Retry
+        # button) - a url is already known by that point, so this skips
+        # straight past the search step above.
         data = request.get_json(silent=True) or {}
         url = (data.get("url") or "").strip()
         if not url:
