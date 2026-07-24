@@ -255,8 +255,8 @@
     <button type="button" class="back" id="back-from-add">&larr; Back</button>
     <h1>Add Songs</h1>
     <form id="add-song-form">
-      <input type="text" id="song-title" placeholder="Song title" autocomplete="off">
-      <input type="text" id="song-artist" placeholder="Artist (optional)" autocomplete="off">
+      <input type="text" id="song-title" placeholder="Song title" autocomplete="off" required>
+      <input type="text" id="song-artist" placeholder="Artist" autocomplete="off" required>
       <button type="submit" class="wide">Add</button>
     </form>
     <div id="status-msg"></div>
@@ -410,9 +410,9 @@ document.getElementById("add-song-form").addEventListener("submit", async (e) =>
   const artistInput = document.getElementById("song-artist");
   const title = titleInput.value.trim();
   const artist = artistInput.value.trim();
-  if (!title) return;
+  if (!title || !artist) return;
 
-  const label = artist ? `"${title}" by ${artist}` : `"${title}"`;
+  const label = `"${title}" by ${artist}`;
   statusMsgEl.textContent = `Looking for ${label}…`;
   titleInput.value = "";
   artistInput.value = "";

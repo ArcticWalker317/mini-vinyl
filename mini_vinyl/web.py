@@ -4,8 +4,8 @@ in-memory Library/WriteCoordinator with no cross-process locking needed.
 No auth - meant for a trusted home LAN only, reached via mDNS
 (http://<hostname>.local:8080), never exposed beyond it.
 
-Adding a song takes just a title (and optionally an artist) and never
-blocks on anything - /api/songs/find kicks off a background search +
+Adding a song takes just a title and artist and never blocks on anything
+- /api/songs/find kicks off a background search +
 best-match pick + download (see Library.enqueue_search), returning a job
 id immediately; /api/songs/find/<id>/status polls it. A burst of Adds
 returns instantly no matter how many are queued up, and finishes on its
@@ -112,8 +112,8 @@ def create_app(library: Library, playlist_store: PlaylistStore, write_coordinato
         data = request.get_json(silent=True) or {}
         title = (data.get("title") or "").strip()
         artist = (data.get("artist") or "").strip()
-        if not title:
-            return {"error": "title is required"}, 400
+        if not title or not artist:
+            return {"error": "title and artist are required"}, 400
         job_id = library.enqueue_search(title, artist)
         return {"job_id": job_id, "status": "searching"}
 

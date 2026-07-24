@@ -154,8 +154,7 @@ http://<hostname>.local:8080
 Options -> Hostname, e.g. `mini-vinyl.local`. Run `hostname` on the Pi if
 you're not sure what it's currently set to.)
 
-Type a **song title** (and, optionally, an **artist** - recommended when
-the title alone is ambiguous) and tap **Add**. There's no results list to
+Type a **song title** and **artist** and tap **Add**. There's no results list to
 browse - the Pi searches YouTube, picks the best-looking match itself,
 and starts downloading it, all in the background; the button returns
 instantly, so you can add a whole stack of songs back to back without

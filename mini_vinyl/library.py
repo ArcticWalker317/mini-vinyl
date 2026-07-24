@@ -32,8 +32,8 @@ reuse - once a code might be sitting on a physical tag, that filename is
 permanently spoken for, download or no download; a retry just resumes
 from the download step rather than re-probing or re-slugifying.
 
-Adding a song only ever needs a title (and, optionally, an artist) from
-the web UI - see enqueue_search(). A YouTube search + pick-the-best-match
+Adding a song only ever needs a title and artist from the web UI - see
+enqueue_search(). A YouTube search + pick-the-best-match
 step (_pick_best_match) resolves that to an actual video before handing
 off to the same enqueue()/download pipeline used everywhere else. That
 resolution runs on its own background worker/queue, entirely separate
